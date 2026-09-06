@@ -81,10 +81,16 @@ class OrderRegistry:
     orders: dict[str, OrderRecord] = field(default_factory=dict)
     pending_ttl_minutes: int = 30
 
+    persist: bool = True
+    """Set False for backtests. There is no crash to recover from in a simulated
+    run, and writing to a shared state directory from parallel workers corrupts
+    the file. The duplicate logic itself still applies in memory."""
+
     def __post_init__(self) -> None:
         self.state_dir = Path(self.state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        self._load()
+        if self.persist:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            self._load()
 
     @property
     def path(self) -> Path:
@@ -162,6 +168,8 @@ class OrderRegistry:
     # ---- persistence -----------------------------------------------------
 
     def save(self) -> None:
+        if not self.persist:
+            return
         # Written before submission, so a crash leaves evidence of the attempt.
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({k: asdict(v) for k, v in self.orders.items()}, indent=2))

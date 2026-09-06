@@ -109,6 +109,21 @@ class ExitConfig(BaseModel):
     than 10%" behaviour from the brief."""
 
     trailing_enabled: bool = True
+
+    trailing_mode: Literal["giveback_of_gain", "pct_of_peak_value"] = "giveback_of_gain"
+    """How the trailing stop is measured, which matters more than it looks.
+
+    ``giveback_of_gain`` surrenders a fraction of the *profit*: from a +30% peak
+    at 40% giveback, the exit sits at +18%. The stop widens as the trade works,
+    so a winner is given room proportional to what it has already earned.
+
+    ``pct_of_peak_value`` surrenders a fraction of the option's *price*, which is
+    the more common formulation: a 5% trail from a $13.00 peak exits at $12.35.
+    On a 0.6-delta contract, 5% of premium is roughly a 0.5% move in the
+    underlying — inside the daily noise of most large caps, so it exits winners
+    early. Run ``optionsagent sweep`` before choosing.
+    """
+
     trailing_giveback_pct: float = 0.40
     """Once armed, exit after surrendering 40% of the peak gain. At a +25% peak
     that means exiting at +15%, so the floor always stays above the +10% target."""

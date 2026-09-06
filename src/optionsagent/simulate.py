@@ -27,6 +27,7 @@ from .brokers.paper import PaperBroker
 from .config import Config
 from .engine import TradingEngine
 from .marketdata.synthetic import SyntheticMarketData
+from .orders import OrderRegistry
 from .portfolio import Portfolio
 from .strategy.signals import MomentumSignal, PriceHistory
 
@@ -179,6 +180,7 @@ def run_world(
             portfolio=portfolio,
             signal=MomentumSignal(),
             history=history,
+            orders=OrderRegistry(persist=False),
         )
 
         peak = broker.equity()

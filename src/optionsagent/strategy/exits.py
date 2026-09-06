@@ -25,13 +25,21 @@ from ..models import ExitDecision, ExitReason, OptionQuote, Position, utcnow
 def trailing_stop_level(peak_return: float, cfg: ExitConfig) -> float:
     """The return at which a trailing position gets closed.
 
-    Gives back ``trailing_giveback_pct`` of the peak gain but never trails below
-    ``trailing_floor_pct``. At a +30% peak with the default 40% giveback the
-    stop sits at +18%; at a +12% peak the arithmetic would say +7.2%, so the
-    floor pins it at +10% instead. That floor is what makes this faithful to
-    "sell if it drops back under 10%".
+    Under ``giveback_of_gain`` the stop surrenders ``trailing_giveback_pct`` of
+    the peak gain: at a +30% peak with the default 40% giveback it sits at +18%.
+    At a +12% peak the arithmetic would say +7.2%, so ``trailing_floor_pct``
+    pins it at +10% instead, which is what makes this faithful to "sell if it
+    drops back under 10%".
+
+    Under ``pct_of_peak_value`` the stop surrenders a fraction of the option's
+    price. A peak return of +30% means the contract is at 1.30x cost, so a 5%
+    trail exits at 1.30 * 0.95 = 1.235x, i.e. +23.5%.
     """
-    return max(cfg.trailing_floor_pct, peak_return * (1.0 - cfg.trailing_giveback_pct))
+    if cfg.trailing_mode == "pct_of_peak_value":
+        level = (1.0 + peak_return) * (1.0 - cfg.trailing_giveback_pct) - 1.0
+    else:
+        level = peak_return * (1.0 - cfg.trailing_giveback_pct)
+    return max(cfg.trailing_floor_pct, level)
 
 
 def evaluate_exit(
