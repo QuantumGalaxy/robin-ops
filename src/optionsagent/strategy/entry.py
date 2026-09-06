@@ -188,8 +188,7 @@ class EntryScreener:
         vol_value = 1.0 - min(1.0, max(0.0, iv_rank))
         delta_fit = 1.0 - min(
             1.0,
-            abs(abs(g.delta) - 0.60)
-            / max(self.cfg.max_abs_delta - self.cfg.min_abs_delta, 0.1),
+            abs(abs(g.delta) - 0.60) / max(self.cfg.max_abs_delta - self.cfg.min_abs_delta, 0.1),
         )
         liquidity = min(1.0, math.log10(max(q.open_interest, 1)) / 4.0)
         return (

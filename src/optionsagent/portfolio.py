@@ -111,9 +111,7 @@ class Portfolio:
             "closed_trades": len(self.trades),
             "realized_pnl": round(self.realized_pnl, 2),
             "win_rate": round(len(wins) / len(self.trades), 4) if self.trades else 0.0,
-            "avg_win_pct": (
-                round(sum(t.return_pct for t in wins) / len(wins), 4) if wins else 0.0
-            ),
+            "avg_win_pct": (round(sum(t.return_pct for t in wins) / len(wins), 4) if wins else 0.0),
             "avg_loss_pct": (
                 round(sum(t.return_pct for t in losses) / len(losses), 4) if losses else 0.0
             ),

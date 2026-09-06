@@ -15,6 +15,7 @@ START = date(2025, 3, 3)
 
 
 def build(tmp_path, **cfg_overrides):
+    cfg_overrides.setdefault("state_dir", str(tmp_path))
     cfg = Config(**cfg_overrides)
     market = SyntheticMarketData(symbols=cfg.universe.symbols, seed=5, today=START)
     broker = PaperBroker(

@@ -483,5 +483,65 @@ def init_config(
     console.print(f"[green]wrote {path}[/green]")
 
 
+@app.command("mcp-probe")
+def mcp_probe(
+    snapshot: Annotated[
+        Path | None, typer.Option(help="Write the full tool schemas here as JSON.")
+    ] = None,
+) -> None:
+    """Enumerate the Robinhood Trading MCP tools your account actually exposes.
+
+    Robinhood publishes tool names but not response schemas, and the server is in
+    beta. Run this before trusting the adapters, and again whenever something
+    starts parsing oddly: a missing tool usually means options approval is still
+    pending rather than that the code is broken.
+
+    Requires ROBINHOOD_MCP_TOKEN. Authorise once in a desktop browser through an
+    MCP host, then export the access token.
+    """
+    from .mcp.client import HttpToolCaller, McpError
+    from .mcp.robinhood import REQUIRED_TOOLS
+
+    try:
+        caller = HttpToolCaller()
+        tools = caller.list_tools()
+    except McpError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    table = Table(title=f"{len(tools)} tools available", header_style="bold cyan")
+    table.add_column("Tool")
+    table.add_column("Needed", justify="center")
+    table.add_column("Description", overflow="fold")
+    available = {t.get("name") for t in tools}
+    for tool in sorted(tools, key=lambda t: str(t.get("name"))):
+        name = str(tool.get("name"))
+        table.add_row(
+            name,
+            "[green]yes[/green]" if name in REQUIRED_TOOLS else "",
+            str(tool.get("description", ""))[:90],
+        )
+    console.print(table)
+
+    missing = [t for t in REQUIRED_TOOLS if t not in available]
+    if missing:
+        console.print(
+            Panel(
+                "This account is missing: " + ", ".join(missing) + "\n"
+                "Options tools need level 2 approval. Ask your agent to call "
+                "get_option_level_upgrade_info for the application link.",
+                title="Not ready to trade options",
+                border_style="red",
+            )
+        )
+    else:
+        console.print("[green]All tools this agent needs are present.[/green]")
+
+    if snapshot:
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_text(json.dumps(tools, indent=2, sort_keys=True))
+        console.print(f"[dim]wrote {snapshot} — diff it after any Robinhood update[/dim]")
+
+
 if __name__ == "__main__":
     app()

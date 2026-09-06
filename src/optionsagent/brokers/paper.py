@@ -162,3 +162,7 @@ class PaperBroker(Broker):
         cutoff = self.clock().date() - timedelta(days=7)
         self._day_trades = [d for d in self._day_trades if d >= cutoff]
         return len(self._day_trades)
+
+    def has_open_order(self, occ_symbol: str) -> bool:
+        """Fills here are synchronous, so nothing is ever left working."""
+        return False

@@ -127,9 +127,7 @@ def test_time_stop_after_two_weeks():
 
 def test_earnings_exit():
     pos = make_position()
-    d = evaluate_exit(
-        pos, make_quote(pos, 10.1), ExitConfig(), as_of=NOW, earnings_date=NOW.date()
-    )
+    d = evaluate_exit(pos, make_quote(pos, 10.1), ExitConfig(), as_of=NOW, earnings_date=NOW.date())
     assert d.should_exit
     assert "IV crush" in d.detail
 

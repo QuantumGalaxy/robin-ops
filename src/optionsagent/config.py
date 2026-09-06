@@ -8,6 +8,7 @@ so the two can be simulated side by side.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,9 +20,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # near-penny option spreads. Liquidity is the selection criterion here: a 10%
 # profit target is unreachable on a contract whose spread is 15% of mid.
 DEFAULT_UNIVERSE: list[str] = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "TSLA",
-    "JPM", "V", "UNH", "XOM", "COST", "HD", "LLY", "AMD",
-    "NFLX", "CRM", "QQQ", "SPY",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "AVGO",
+    "TSLA",
+    "JPM",
+    "V",
+    "UNH",
+    "XOM",
+    "COST",
+    "HD",
+    "LLY",
+    "AMD",
+    "NFLX",
+    "CRM",
+    "QQQ",
+    "SPY",
 ]
 
 
@@ -188,19 +206,38 @@ class MarketConfig(BaseModel):
 
 
 class BrokerConfig(BaseModel):
-    kind: Literal["paper", "robinhood"] = "paper"
+    kind: Literal["paper", "robinhood_mcp", "robinhood"] = "paper"
+    """``robinhood_mcp`` is the official Trading MCP and the one to use. ``robinhood``
+    is the unofficial ``robin_stocks`` path, kept only for reference."""
+
     starting_equity: float = 25_000.0
     """Paper broker only."""
 
     dry_run: bool = True
-    """When true against a live broker, orders are logged but never submitted."""
+    """When true against a live broker, orders are still reviewed with the broker's
+    own pre-trade simulation but never submitted."""
 
     require_confirmation: bool = True
+
+
+class Mode(StrEnum):
+    """Operating modes, in the order you should progress through them."""
+
+    OFF = "off"
+    SCAN_ONLY = "scan_only"
+    """Screen and log candidates. Opens nothing, not even on paper."""
+
+    PAPER = "paper"
+    LIVE_APPROVAL = "live_approval"
+    """Prepare and review real orders, but require a human yes on each one."""
+
+    LIVE_AUTO = "live_auto"
 
 
 class Config(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPTIONSAGENT_", env_nested_delimiter="__")
 
+    mode: Mode = Mode.PAPER
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
     exit: ExitConfig = Field(default_factory=ExitConfig)

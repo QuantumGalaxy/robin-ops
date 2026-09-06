@@ -19,12 +19,14 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from .brokers.base import Broker
-from .config import Config
+from .config import Config, Mode
 from .greeks import intrinsic
 from .marketdata.base import MarketDataProvider
-from .models import ExitReason, OptionQuote, Position, utcnow
+from .models import ExitReason, OptionQuote, Position, Side, utcnow
+from .orders import OrderRegistry, OrderState, client_order_id
 from .portfolio import Portfolio
 from .risk import RiskManager
 from .strategy.entry import EntryScreener
@@ -43,7 +45,11 @@ class LoopReport:
     closed: list[str] = field(default_factory=list)
     held: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    candidates: list[str] = field(default_factory=list)
+    """Populated in scan-only mode: what the agent would have bought."""
+
     blocked_reason: str = ""
+    reconcile_mismatch: str = ""
 
     def describe(self) -> str:
         bits = [f"equity ${self.equity:,.0f}"]
@@ -67,12 +73,24 @@ class TradingEngine:
     history: PriceHistory = field(default_factory=PriceHistory)
     risk: RiskManager | None = None
     screener: EntryScreener | None = None
+    orders: OrderRegistry | None = None
     max_candidates_considered: int = 12
     """How far down the ranked list to look for a contract that fits the budget."""
+
+    halt_on_reconcile_mismatch: bool = True
+    """Stop opening positions when the ledger and the broker disagree.
+
+    A mismatch means the agent's picture of what it owns is wrong, and sizing,
+    exposure caps, and exit logic are all computed from that picture. Continuing
+    to open new positions on a known-bad view is how a small bug becomes a large
+    one. Exits keep running regardless.
+    """
 
     def __post_init__(self) -> None:
         if self.risk is None:
             self.risk = RiskManager(self.config.risk)
+        if self.orders is None:
+            self.orders = OrderRegistry(state_dir=Path(self.config.state_dir))
         if self.screener is None:
             self.screener = EntryScreener(
                 cfg=self.config.entry,
@@ -103,7 +121,12 @@ class TradingEngine:
         self._manage_exits(now, report)
 
         allowed, reason = self.risk.can_open(equity, self.broker.day_trades_used())
-        if allowed:
+        if self.config.mode is Mode.SCAN_ONLY:
+            self._scan_entries(now, report, dry=True)
+            report.blocked_reason = "scan-only mode: candidates logged, nothing opened"
+        elif report.reconcile_mismatch:
+            report.blocked_reason = report.reconcile_mismatch
+        elif allowed:
             self._scan_entries(now, report)
         else:
             report.blocked_reason = reason
@@ -169,8 +192,14 @@ class TradingEngine:
                 )
 
     def _reconcile(self, report: LoopReport) -> None:
-        """Book positions that left the broker without the agent selling them."""
-        for position in self.portfolio.find_orphans(self.broker.positions()):
+        """Book positions that left the broker without the agent selling them.
+
+        The broker is the source of record. Where the two disagree the ledger is
+        corrected, and — because a disagreement means the agent's view was wrong
+        about something — new entries are held for the rest of the loop.
+        """
+        orphans = self.portfolio.find_orphans(self.broker.positions())
+        for position in orphans:
             mark = position.last_mark or position.entry_price
             log.warning(
                 "%s is no longer held at the broker; booking it closed at the last mark $%.2f",
@@ -182,6 +211,12 @@ class TradingEngine:
                 assert self.risk is not None
                 self.risk.record_trade_result(record.pnl)
                 report.closed.append(f"{position.contract} (closed outside the agent)")
+
+        if orphans and self.halt_on_reconcile_mismatch:
+            report.reconcile_mismatch = (
+                f"{len(orphans)} position(s) disagreed with the broker; "
+                "holding new entries this loop"
+            )
 
     def _manage_exits(self, now: datetime, report: LoopReport) -> None:
         for key, position in list(self.portfolio.positions.items()):
@@ -231,7 +266,7 @@ class TradingEngine:
                     f"${record.pnl:+,.0f} / {record.return_pct:+.1%}"
                 )
 
-    def _scan_entries(self, now: datetime, report: LoopReport) -> None:
+    def _scan_entries(self, now: datetime, report: LoopReport, dry: bool = False) -> None:
         cfg = self.config
         assert self.screener is not None
         if len(self.portfolio.positions) >= cfg.sizing.max_positions:
@@ -293,7 +328,14 @@ class TradingEngine:
                 )
                 continue
 
-            fill = self._buy_with_reprice(best.quote, sizing.contracts)
+            if dry:
+                report.candidates.append(
+                    f"{best.contract} x{sizing.contracts} @ ~${best.quote.mid:.2f} | "
+                    + "; ".join(best.reasons)
+                )
+                continue
+
+            fill = self._buy_with_reprice(best.quote, sizing.contracts, now)
             if fill is None:
                 report.skipped.append(
                     f"{symbol}: entry did not fill within the slippage budget "
@@ -361,20 +403,60 @@ class TradingEngine:
         step = (ceiling - start) / (attempts - 1)
         return [round(start + step * i, 4) for i in range(attempts)]
 
-    def _buy_with_reprice(self, quote: OptionQuote, quantity: int):
+    def _buy_with_reprice(self, quote: OptionQuote, quantity: int, now: datetime | None = None):
         """Work an entry order up the spread until it fills or the budget runs out.
 
-        A real adapter is responsible for the place/wait/cancel cycle behind each
-        call; here it is one synchronous attempt per rung.
+        The whole ladder is **one** trading intent, reserved once against the
+        order registry. Each rung is a cancel-and-replace at a slightly worse
+        price, not a new decision, so repricing must not trip the duplicate
+        guard. A real adapter owns the place/wait/cancel cycle behind each call;
+        here it is one synchronous attempt per rung.
+
+        The intent is written to disk *before* the first submission. If the
+        process dies between that write and the broker's response, the next run
+        sees a pending order and reconciles instead of buying the contract twice.
         """
-        for concession in self._concession_ladder(self.config.execution.entry_limit_offset):
-            limit = self._entry_limit(quote, concession)
-            fill = self.broker.buy_to_open(quote, quantity, limit)
-            if fill is not None:
-                return fill
+        assert self.orders is not None
+        contract = quote.contract
+        if self.orders.has_pending_for(contract.occ_symbol):
+            log.info("an order is already working on %s; not adding another", contract)
+            return None
+
+        # Stamped with the loop's decision time, not the wall clock, so a
+        # backtest stepping through simulated days does not collapse every order
+        # into the same minute and suppress itself.
+        order_id = client_order_id(contract, Side.BUY, quantity, now)
+        if self.orders.is_duplicate(order_id):
+            log.warning("suppressing duplicate buy for %s", contract)
+            return None
+
+        ladder = self._concession_ladder(self.config.execution.entry_limit_offset)
+        self.orders.reserve(order_id, contract, Side.BUY, quantity, self._entry_limit(quote))
+        try:
+            for concession in ladder:
+                limit = self._entry_limit(quote, concession)
+                fill = self.broker.buy_to_open(quote, quantity, limit)
+                if fill is not None:
+                    self.orders.mark(order_id, OrderState.FILLED, broker_order_id=fill.order_id)
+                    return fill
+        except Exception as exc:
+            # A raised exception means nothing rests at the broker.
+            self.orders.mark(order_id, OrderState.FAILED, detail=repr(exc))
+            raise
+
+        # Nothing filled. If the broker can tell us no order is working, release
+        # the reservation so the next loop may try again. When it cannot, leave
+        # the order pending and let the stale-pending TTL free it, because
+        # assuming "not filled" on an ambiguous response is how you end up long
+        # two contracts.
+        if self.broker.has_open_order(contract.occ_symbol) is False:
+            self.orders.mark(order_id, OrderState.FAILED, detail="no rung filled")
         return None
 
     def _sell_with_reprice(self, position: Position, quote: OptionQuote, urgent: bool):
+        # Exits are never suppressed by the duplicate guard. Selling a contract
+        # you no longer hold is rejected by the broker; failing to sell one you do
+        # hold is the expensive mistake.
         if urgent:
             return self.broker.sell_to_close(
                 position, quote, self._exit_limit(quote, True), urgent=True

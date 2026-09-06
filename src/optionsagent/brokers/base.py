@@ -47,5 +47,14 @@ class Broker(ABC):
         """Day trades in the trailing 5 business days, for PDT protection."""
         return 0
 
+    def has_open_order(self, occ_symbol: str) -> bool | None:
+        """Is an order working on this contract?
+
+        Returns None when the adapter cannot tell. Callers must treat None as
+        "possibly yes" — an ambiguous submission assumed to be dead is exactly
+        how an agent ends up holding twice the position it sized for.
+        """
+        return None
+
     def cancel_all(self) -> None:
         return None

@@ -106,8 +106,13 @@ class RobinhoodMarketData(MarketDataProvider):
         dte = contract.days_to_expiry(self._today())
         T = years_to_expiry(dte)
         iv = implied_vol(
-            quote.mid, spot, contract.strike, T, self.risk_free_rate,
-            self.dividend_yield, contract.right,
+            quote.mid,
+            spot,
+            contract.strike,
+            T,
+            self.risk_free_rate,
+            self.dividend_yield,
+            contract.right,
         )
         if iv is None:
             # Fall back to the broker's own IV rather than dropping the contract;
@@ -115,8 +120,13 @@ class RobinhoodMarketData(MarketDataProvider):
             iv = _f(payload.get("implied_volatility"))
         if iv > 0:
             quote.greeks = compute_greeks(
-                spot, contract.strike, T, self.risk_free_rate, iv,
-                self.dividend_yield, contract.right,
+                spot,
+                contract.strike,
+                T,
+                self.risk_free_rate,
+                iv,
+                self.dividend_yield,
+                contract.right,
             )
             self._iv_history.setdefault(contract.symbol, []).append(iv)
         return quote

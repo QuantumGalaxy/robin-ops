@@ -333,25 +333,62 @@ is exactly why the premium caps in the table above exist alongside the stop.
 
 ## 11. Robinhood specifically
 
-Worth being blunt about, because it constrains everything above.
+**Use the official Trading MCP, not `robin_stocks`.**
 
-- **There is no supported retail options API.** `robin_stocks` drives the private
-  endpoints the mobile app uses. It is a grey area under their terms, and the endpoints
-  change without notice. Account restriction is a real, if uncommon, risk.
-- **Quotes are snapshots, not a stream.** Polling 20 underlyings plus open positions
-  takes real time and will hit rate limits if pushed. The 60-second default loop is
-  deliberately conservative, and it means you are not reacting intraday to a fast move.
-- **Greeks from the endpoint are unreliable.** Often null or stale. The agent ignores
-  them and recomputes from the mid price, which also keeps paper and live numerically
-  identical.
-- **Auth requires MFA.** Use a TOTP secret, or the agent cannot re-authenticate
-  unattended.
-- **You need options approval level 2** for long calls and puts.
+Robinhood shipped an official Model Context Protocol server at
+`https://agent.robinhood.com/mcp/trading` in May 2026, and agentic **options** trading
+went live for all US customers in early July 2026. This is a supported, documented
+integration path and it is strictly better than screen-scraping the mobile endpoints.
 
-If you want this running unattended against real money, a broker with a documented
-options API is a materially better foundation. The adapter boundary is deliberately
-narrow — one data class and one broker class — so switching is a contained change
-rather than a rewrite.
+The options tool surface is exactly what this agent needs:
+
+| Tool | Used for |
+| --- | --- |
+| `get_option_chains` | Load the chain for a symbol |
+| `get_option_instruments` | Filter contracts by expiry, strike, type |
+| `get_option_quotes` | Real-time quotes and Greeks |
+| `get_option_historicals` | OHLC bars per contract |
+| `get_option_positions` | Open and closed positions, for reconciliation |
+| `get_option_orders` | Order history, for duplicate detection |
+| `review_option_order` | **Simulate an order and get pre-trade alerts** |
+| `place_option_order` | Submit |
+| `cancel_option_order` | Cancel |
+
+Properties that matter for an unattended agent:
+
+- **OAuth 2.1 + PKCE.** The agent never sees your password, and there is no TOTP
+  scraping. Tokens are scoped and revocable from the Robinhood app.
+- **Trading is confined to a separate Agentic account** that you fund deliberately.
+  Every other Robinhood account is readable but not tradable. That is a stronger
+  containment boundary than any kill switch this code could implement, and it is the
+  single best reason to prefer this over the unofficial API.
+- **`review_option_order` is a first-class dry run.** It returns pre-trade alerts from
+  the broker itself, so the "propose then approve" mode below is native rather than
+  simulated.
+- **Robinhood does not supervise the agent.** There are no server-side risk limits.
+  Position sizing, symbol allow-lists, and daily caps are entirely the client's job,
+  which is what everything in section 10 exists to do.
+
+Still true, and still constraints:
+
+- **Quotes are request/response, not a stream.** Polling 20 underlyings plus open
+  positions costs real time. The 60-second default loop is deliberate, and it means
+  the agent is not reacting intraday to a fast move.
+- **You need options approval level 2** for long calls and puts. `get_option_level_upgrade_info`
+  returns the link to apply.
+- **PDT still applies.** An Agentic account is an ordinary self-directed brokerage
+  account, so the pattern-day-trader rule binds below $25k exactly as described above.
+- **You are responsible for the trades your agent places.** Robinhood's terms are
+  explicit that liability does not move to the agent or the model provider.
+
+The agent computes its own Greeks from the mid price even when the API supplies them,
+so paper and live remain numerically identical and a null or stale field cannot silently
+change position sizing.
+
+> An earlier revision of this document claimed no supported retail options API existed
+> and recommended a different broker. That was wrong. `brokers/robinhood.py` and
+> `marketdata/robinhood.py` still contain the unofficial `robin_stocks` path; prefer
+> the `*_mcp.py` adapters.
 
 ---
 

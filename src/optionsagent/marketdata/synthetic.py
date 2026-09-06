@@ -33,13 +33,26 @@ from .base import MarketDataProvider
 # Rough starting prices and annualised vols. Only relative magnitudes matter for
 # simulation, but realistic levels keep contract prices in a plausible range.
 _DEFAULT_SPEC: dict[str, tuple[float, float]] = {
-    "AAPL": (228.0, 0.26), "MSFT": (415.0, 0.24), "NVDA": (128.0, 0.48),
-    "AMZN": (186.0, 0.30), "GOOGL": (168.0, 0.28), "META": (520.0, 0.33),
-    "AVGO": (168.0, 0.40), "TSLA": (245.0, 0.55), "JPM": (215.0, 0.22),
-    "V": (280.0, 0.19), "UNH": (580.0, 0.24), "XOM": (118.0, 0.23),
-    "COST": (890.0, 0.20), "HD": (390.0, 0.22), "LLY": (900.0, 0.30),
-    "AMD": (155.0, 0.45), "NFLX": (700.0, 0.32), "CRM": (255.0, 0.31),
-    "QQQ": (480.0, 0.18), "SPY": (560.0, 0.14),
+    "AAPL": (228.0, 0.26),
+    "MSFT": (415.0, 0.24),
+    "NVDA": (128.0, 0.48),
+    "AMZN": (186.0, 0.30),
+    "GOOGL": (168.0, 0.28),
+    "META": (520.0, 0.33),
+    "AVGO": (168.0, 0.40),
+    "TSLA": (245.0, 0.55),
+    "JPM": (215.0, 0.22),
+    "V": (280.0, 0.19),
+    "UNH": (580.0, 0.24),
+    "XOM": (118.0, 0.23),
+    "COST": (890.0, 0.20),
+    "HD": (390.0, 0.22),
+    "LLY": (900.0, 0.30),
+    "AMD": (155.0, 0.45),
+    "NFLX": (700.0, 0.32),
+    "CRM": (255.0, 0.31),
+    "QQQ": (480.0, 0.18),
+    "SPY": (560.0, 0.14),
 }
 
 
@@ -177,9 +190,9 @@ class SyntheticMarketData(MarketDataProvider):
         path = [st.spot]
         price = st.spot
         for _ in range(days):
-            ret = (st.drift - 0.5 * st.base_vol**2) * dt + st.base_vol * math.sqrt(
-                dt
-            ) * rng.gauss(0.0, 1.0)
+            ret = (st.drift - 0.5 * st.base_vol**2) * dt + st.base_vol * math.sqrt(dt) * rng.gauss(
+                0.0, 1.0
+            )
             price = max(1.0, price / math.exp(ret))
             path.append(price)
         return list(reversed(path))

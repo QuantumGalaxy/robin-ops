@@ -119,9 +119,7 @@ class SimResult:
             "median_return": round(statistics.median(rets), 4) if rets else 0.0,
             "p05_return": round(self.percentile(0.05), 4),
             "p95_return": round(self.percentile(0.95), 4),
-            "prob_profit": (
-                round(sum(1 for r in rets if r > 0) / len(rets), 4) if rets else 0.0
-            ),
+            "prob_profit": (round(sum(1 for r in rets if r > 0) / len(rets), 4) if rets else 0.0),
             "avg_max_drawdown": (
                 round(statistics.fmean(self.max_drawdowns), 4) if self.max_drawdowns else 0.0
             ),
@@ -167,9 +165,7 @@ def run_world(
         # Spread the intraday polls across the 6.5-hour session so that
         # ``days_held`` and the time stop advance smoothly.
         minutes = int(390 * (slot["i"] / steps_per_day))
-        return datetime.combine(market.today, time(9, 30), tzinfo=UTC) + timedelta(
-            minutes=minutes
-        )
+        return datetime.combine(market.today, time(9, 30), tzinfo=UTC) + timedelta(minutes=minutes)
 
     broker = PaperBroker(
         starting_equity=config.broker.starting_equity, seed=seed * 31 + 7, clock=clock
