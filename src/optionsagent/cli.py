@@ -374,11 +374,16 @@ def run(
 
     provider_kind = "paper" if cfg.broker.kind == "paper" else "robinhood"
     data = build_provider(provider_kind, risk_free_rate=cfg.market.risk_free_rate)
-    broker_kwargs = (
-        {"starting_equity": cfg.broker.starting_equity}
-        if cfg.broker.kind == "paper"
-        else {"dry_run": cfg.broker.dry_run}
-    )
+    if cfg.broker.kind == "paper":
+        # Give the paper broker the synthetic market's clock. Without it,
+        # day-trade accounting runs on wall-clock time while positions are
+        # opened in simulated time, and every close looks like a day trade.
+        broker_kwargs = {
+            "starting_equity": cfg.broker.starting_equity,
+            "clock": lambda: _sim_now(data) or datetime.now(UTC),
+        }
+    else:
+        broker_kwargs = {"dry_run": cfg.broker.dry_run}
     broker = build_broker(cfg.broker.kind, **broker_kwargs)
     portfolio = Portfolio.load(cfg.state_dir)
 
