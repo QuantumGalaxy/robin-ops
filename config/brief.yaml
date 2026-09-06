@@ -1,0 +1,55 @@
+# The rules exactly as originally specified, encoded so they can be simulated
+# head to head against the recommended set:
+#
+#   - buy roughly two-week options
+#   - sell the moment the position is up 10%
+#   - hold to expiry otherwise
+#   - cut anything down 50%, and definitely cut it in the last few days
+#
+# Run the comparison with:
+#   optionsagent simulate --config config/brief.yaml --compare config/recommended.yaml
+#
+# This file intentionally leaves out the liquidity, IV, and decay filters. That
+# is the point of the comparison: it shows what each one is actually buying you.
+
+entry:
+  min_dte: 7
+  max_dte: 16
+  min_abs_delta: 0.20
+  max_abs_delta: 0.65
+  max_spread_pct: 0.20
+  min_open_interest: 0
+  min_volume: 0
+  max_theta_pct_per_day: 0.20
+  max_delta_change_per_1pct: 5.0
+  max_iv_rank: 1.0
+  min_premium: 0.30
+  max_premium: 25.0
+  avoid_earnings_within_days: 0
+
+exit:
+  take_profit_pct: 0.10
+  trailing_enabled: false        # sell at +10%, full stop
+  stop_loss_pct: -0.50
+  expiry_guard_dte: 1            # hold nearly to expiry
+  expiry_guard_loss_pct: -0.50
+  max_hold_days: 14
+  theta_bleed_exit: false
+  exit_before_earnings: false
+
+sizing:
+  risk_per_trade_pct: 0.04
+  max_positions: 8
+  max_positions_per_symbol: 1
+  max_portfolio_premium_pct: 0.60
+  cash_reserve_pct: 0.05
+
+risk:
+  daily_loss_limit_pct: 1.0      # effectively off
+  max_drawdown_halt_pct: 1.0
+  max_consecutive_losses: 999
+  pdt_protection: false
+
+broker:
+  kind: paper
+  starting_equity: 25000.0

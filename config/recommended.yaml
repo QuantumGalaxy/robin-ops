@@ -1,0 +1,92 @@
+# The recommended parameter set. These are also the code defaults, written out
+# here so the differences from config/brief.yaml are visible in one diff.
+#
+# Every deviation from the original brief is annotated with the reason.
+
+universe:
+  symbols:
+    - AAPL
+    - MSFT
+    - NVDA
+    - AMZN
+    - GOOGL
+    - META
+    - AVGO
+    - TSLA
+    - JPM
+    - V
+    - UNH
+    - XOM
+    - COST
+    - HD
+    - LLY
+    - AMD
+    - NFLX
+    - CRM
+    - QQQ
+    - SPY
+
+entry:
+  # Buy 30-45 DTE and exit after ~14 days rather than buying 14 DTE outright.
+  # Same two-week directional window, far less time decay paid for it.
+  min_dte: 30
+  max_dte: 45
+  # Slightly in-the-money. A 0.60-delta contract reaches +10% on a much smaller
+  # stock move than a cheap out-of-the-money one, and its spread is tighter.
+  min_abs_delta: 0.45
+  max_abs_delta: 0.70
+  # A round trip costs the spread twice. Above ~6% the +10% target is unreachable.
+  max_spread_pct: 0.06
+  min_open_interest: 500
+  min_volume: 25
+  max_theta_pct_per_day: 0.025
+  max_delta_change_per_1pct: 0.12
+  # Do not buy premium when volatility is already expensive.
+  max_iv_rank: 0.75
+  min_premium: 0.75
+  max_premium: 25.0
+  avoid_earnings_within_days: 7
+
+exit:
+  take_profit_pct: 0.10
+  # +10% arms a trailing stop instead of selling. This is "keep it while I am
+  # still up more than 10%", and it is what lets winners pay for losers.
+  trailing_enabled: true
+  trailing_giveback_pct: 0.40
+  trailing_floor_pct: 0.10
+  stop_loss_pct: -0.50
+  # Be flat before expiry week: gamma spikes and spreads widen there.
+  expiry_guard_dte: 3
+  expiry_guard_loss_pct: -0.30
+  max_hold_days: 14
+  theta_bleed_exit: true
+  theta_bleed_pct_per_day: 0.04
+  exit_before_earnings: true
+  earnings_exit_days: 1
+
+sizing:
+  # 2% of equity at risk per trade; with a -50% stop that is 4% of equity in premium.
+  risk_per_trade_pct: 0.02
+  max_positions: 6
+  max_positions_per_symbol: 1
+  max_portfolio_premium_pct: 0.25
+  cash_reserve_pct: 0.20
+
+risk:
+  daily_loss_limit_pct: 0.05
+  max_drawdown_halt_pct: 0.20
+  max_consecutive_losses: 5
+  pdt_protection: true
+  pdt_equity_threshold: 25000.0
+  pdt_max_day_trades: 3
+
+execution:
+  poll_interval_seconds: 60
+  entry_limit_offset: 0.25
+  exit_limit_offset: 0.25
+  urgent_cross_spread: true
+
+broker:
+  kind: paper
+  starting_equity: 25000.0
+  dry_run: true

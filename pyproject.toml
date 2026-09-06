@@ -1,0 +1,40 @@
+[project]
+name = "optionsagent"
+version = "0.1.0"
+description = "Rule-based options trading agent for Robinhood with Greeks-aware entry screening and automated exits"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-dateutil>=2.9",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+robinhood = ["robin-stocks>=3.1.0", "pyotp>=2.9.0"]
+dev = ["pytest>=8.2", "ruff>=0.5"]
+
+[project.scripts]
+optionsagent = "optionsagent.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/optionsagent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

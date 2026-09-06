@@ -1,0 +1,227 @@
+"""Configuration schema.
+
+Every tunable lives here so that the strategy has no magic numbers buried in it.
+Defaults encode the recommended parameter set (see ``docs/DESIGN.md``); the
+literal rules from the original brief are available via ``config/brief.yaml``
+so the two can be simulated side by side.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Large-cap, deeply liquid names with weekly expirations and penny-wide or
+# near-penny option spreads. Liquidity is the selection criterion here: a 10%
+# profit target is unreachable on a contract whose spread is 15% of mid.
+DEFAULT_UNIVERSE: list[str] = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "TSLA",
+    "JPM", "V", "UNH", "XOM", "COST", "HD", "LLY", "AMD",
+    "NFLX", "CRM", "QQQ", "SPY",
+]
+
+
+class UniverseConfig(BaseModel):
+    symbols: list[str] = Field(default_factory=lambda: list(DEFAULT_UNIVERSE))
+    max_symbols: int = 20
+
+    @model_validator(mode="after")
+    def _dedupe(self) -> UniverseConfig:
+        seen: list[str] = []
+        for s in self.symbols:
+            u = s.upper().strip()
+            if u and u not in seen:
+                seen.append(u)
+        object.__setattr__(self, "symbols", seen[: self.max_symbols])
+        return self
+
+
+class EntryConfig(BaseModel):
+    """Filters applied to every contract before it can be bought."""
+
+    min_dte: int = 30
+    max_dte: int = 45
+    """Buy 30-45 DTE and plan to exit by ``max_hold_days``.
+
+    The brief asked for 14-day contracts. Theta decay is roughly proportional to
+    1/sqrt(T), so the final two weeks are where an option bleeds fastest. Buying
+    30-45 DTE and closing after ~14 days captures the same two-week directional
+    window while paying materially less decay.
+    """
+
+    min_abs_delta: float = 0.45
+    max_abs_delta: float = 0.70
+    """Slightly in-the-money. Delta ~0.60 means the option captures 60% of the
+    underlying's move, needs a far smaller move to reach +10%, and has a much
+    tighter relative spread than a cheap 0.20-delta lottery ticket."""
+
+    max_spread_pct: float = 0.06
+    """Reject anything whose bid-ask spread exceeds 6% of mid."""
+
+    min_open_interest: int = 500
+    min_volume: int = 25
+    max_theta_pct_per_day: float = 0.025
+    """Reject contracts bleeding more than 2.5% of their own value per day."""
+
+    max_delta_change_per_1pct: float = 0.12
+    """Convexity cap, expressed as how much delta moves on a 1% move in the stock
+    (``gamma * 0.01 * S``). Near expiry this number explodes, which is what makes
+    a short-dated position swing faster than a polling loop can defend it."""
+
+    max_iv_rank: float = 0.75
+    """Do not buy premium when implied vol is in the top quartile of its own
+    52-week range; that is where IV crush does the most damage."""
+
+    min_premium: float = 0.75
+    max_premium: float = 25.0
+    avoid_earnings_within_days: int = 7
+    allowed_rights: list[Literal["call", "put"]] = Field(default_factory=lambda: ["call", "put"])
+
+
+class ExitConfig(BaseModel):
+    """The exit rule set. This is where the brief's requirements are encoded."""
+
+    take_profit_pct: float = 0.10
+    """+10% on premium. With ``trailing_enabled`` this arms a trailing stop
+    instead of selling outright, which is the "keep it while I'm still up more
+    than 10%" behaviour from the brief."""
+
+    trailing_enabled: bool = True
+    trailing_giveback_pct: float = 0.40
+    """Once armed, exit after surrendering 40% of the peak gain. At a +25% peak
+    that means exiting at +15%, so the floor always stays above the +10% target."""
+
+    trailing_floor_pct: float = 0.10
+    """The trailing stop can never trail below this. Locks in the brief's +10%."""
+
+    stop_loss_pct: float = -0.50
+    """-50% on premium, checked on every loop regardless of days remaining."""
+
+    expiry_guard_dte: int = 3
+    """At 3 days to expiry, close everything. Gamma explodes and the spread
+    widens, so an unattended agent should simply not be in the position."""
+
+    expiry_guard_loss_pct: float = -0.30
+    """Tighter stop inside the guard window: down 30% with 3 days left is not
+    coming back often enough to justify holding."""
+
+    max_hold_days: int = 14
+    """The brief's two-week window, enforced as a time stop."""
+
+    theta_bleed_exit: bool = True
+    theta_bleed_pct_per_day: float = 0.04
+    """Bail out if decay accelerates past 4%/day while the position is flat or
+    down; at that rate the thesis needs to be right almost immediately."""
+
+    exit_before_earnings: bool = True
+    earnings_exit_days: int = 1
+
+
+class SizingConfig(BaseModel):
+    risk_per_trade_pct: float = 0.02
+    """Fraction of equity put at risk per trade. Because the stop is -50%, the
+    position size is 2x this, i.e. 4% of equity of premium per position."""
+
+    max_positions: int = 6
+    max_positions_per_symbol: int = 1
+    max_portfolio_premium_pct: float = 0.25
+    """Never hold more than 25% of equity as long option premium."""
+
+    min_contracts: int = 1
+    max_contracts: int = 20
+    cash_reserve_pct: float = 0.20
+
+
+class RiskConfig(BaseModel):
+    daily_loss_limit_pct: float = 0.05
+    """Halt new entries for the rest of the session after a 5% equity drawdown."""
+
+    max_drawdown_halt_pct: float = 0.20
+    max_consecutive_losses: int = 5
+    pdt_protection: bool = True
+    pdt_equity_threshold: float = 25_000.0
+    pdt_max_day_trades: int = 3
+    """Under $25k, FINRA allows 3 day trades per rolling 5 business days. A +10%
+    target can easily be hit the same session, so the agent reserves day trades
+    for stop-losses rather than spending them on profit-taking."""
+
+    kill_switch_file: str = "state/KILL"
+
+
+class ExecutionConfig(BaseModel):
+    order_type: Literal["limit"] = "limit"
+    """Market orders on options are how accounts get filled at the ask on a wide
+    spread. The agent only ever sends limit orders."""
+
+    entry_limit_offset: float = 0.25
+    """Fraction of the half-spread to concede on entry: 0.0 bids at mid, 1.0 pays
+    the ask. 0.25 sits just through the mid, which usually fills on a liquid
+    name without donating the whole spread."""
+
+    exit_limit_offset: float = 0.25
+    """Same, for exits: 0.0 offers at mid, 1.0 hits the bid."""
+
+    urgent_cross_spread: bool = True
+    """For stop-losses and expiry guards, cross to the bid to guarantee a fill."""
+
+    reprice_attempts: int = 3
+    reprice_interval_seconds: int = 20
+    max_slippage_pct: float = 0.05
+    poll_interval_seconds: int = 60
+    market_open: str = "09:30"
+    market_close: str = "16:00"
+    entry_window_start: str = "09:45"
+    """No entries in the first 15 minutes; opening spreads are wide and quotes
+    are unreliable."""
+
+    entry_window_end: str = "15:30"
+    timezone: str = "America/New_York"
+
+
+class MarketConfig(BaseModel):
+    risk_free_rate: float = 0.042
+    dividend_yield: float = 0.0
+
+
+class BrokerConfig(BaseModel):
+    kind: Literal["paper", "robinhood"] = "paper"
+    starting_equity: float = 25_000.0
+    """Paper broker only."""
+
+    dry_run: bool = True
+    """When true against a live broker, orders are logged but never submitted."""
+
+    require_confirmation: bool = True
+
+
+class Config(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="OPTIONSAGENT_", env_nested_delimiter="__")
+
+    universe: UniverseConfig = Field(default_factory=UniverseConfig)
+    entry: EntryConfig = Field(default_factory=EntryConfig)
+    exit: ExitConfig = Field(default_factory=ExitConfig)
+    sizing: SizingConfig = Field(default_factory=SizingConfig)
+    risk: RiskConfig = Field(default_factory=RiskConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    market: MarketConfig = Field(default_factory=MarketConfig)
+    broker: BrokerConfig = Field(default_factory=BrokerConfig)
+    state_dir: str = "state"
+
+    @classmethod
+    def load(cls, path: str | Path | None = None) -> Config:
+        if path is None:
+            return cls()
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"config file not found: {p}")
+        data: dict[str, Any] = yaml.safe_load(p.read_text()) or {}
+        return cls(**data)
+
+    def dump(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False))
