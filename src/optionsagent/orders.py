@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -157,8 +158,16 @@ class OrderRegistry:
             return
         # Written before submission, so a crash leaves evidence of the attempt.
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({k: asdict(v) for k, v in self.orders.items()}, indent=2))
+        with tmp.open("w") as handle:
+            json.dump({k: asdict(v) for k, v in self.orders.items()}, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
         tmp.replace(self.path)
+        directory = os.open(self.state_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def _load(self) -> None:
         if not self.path.exists():

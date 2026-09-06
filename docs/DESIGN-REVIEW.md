@@ -1,3 +1,5 @@
+> Historical design/experiment notes. See [current implementation review](SECOND-REVIEW.md) and `config/recommended.yaml` for current behavior. Older sweep numbers predate execution and simulation fixes and do not establish profitability.
+
 # Review of `robinhood_options_trading_agent_design.md`
 
 A comparison against the design in [DESIGN.md](DESIGN.md) and the code in this

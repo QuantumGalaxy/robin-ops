@@ -5,7 +5,7 @@ risk controls, exit rules, durable account state, and a terminal dashboard.
 
 **Live execution is disabled.** This release repairs the review's safety issues;
 it does not claim a validated broker integration or a profitable strategy.
-The HTTP MCP transport refuses placement/cancellation calls. The unofficial
+The HTTP MCP transport allows only explicitly listed read/review calls. The unofficial
 Robinhood adapter is legacy code and is not reachable from the supported runner.
 
 ## Run locally
@@ -19,7 +19,7 @@ optionsagent status
 optionsagent dashboard
 ```
 
-Each synthetic loop advances one calendar day by default. Use `--advance-days`
+Each synthetic loop advances one calendar day by default, skipping weekends. Use `--advance-days`
 to change that, or `--loops -1` to continue at the configured polling interval.
 The dashboard is a read-only terminal view. Ctrl-C closes it without stopping
 another running agent.
@@ -62,8 +62,8 @@ outcomes stay pending indefinitely; a timeout or an empty open-order list is
 not evidence of cancellation. Only synchronous paper fills may be retried.
 
 One process may own a state directory. Use different directories for different
-accounts/data sources. Legacy JSON exports remain available, but the database
-is authoritative. Legacy holdings without a complete account checkpoint refuse
+accounts/data sources. The database is authoritative; legacy JSON exports are
+not updated by the checkpointed runner. Legacy holdings without a complete account checkpoint refuse
 automatic migration, rather than resetting cash and fabricating closed trades.
 Back up the full state directory before any manual repair.
 
@@ -72,7 +72,8 @@ latch an entry halt and are recorded for investigation, never booked as fictiona
 fills. The audit table records decisions, quotes used, errors and loop summaries.
 
 ```sh
-touch state/KILL   # pause new entries; position monitoring continues
+optionsagent pause    # pause entries; position monitoring continues
+optionsagent resume   # remove operator pause; safety halts still apply
 ```
 
 ## Verification
@@ -87,3 +88,5 @@ full restart recovery, reconciliation, quote freshness, costs and profit-lock.
 Synthetic sweeps are mechanical stress tests, not historical backtests or
 out-of-sample evidence. Previously published sweep statistics predate these fixes
 and must not be used to select live parameters.
+
+See the [second-review design checklist](docs/SECOND-REVIEW.md) for current readiness, fixes and remaining MVP work.

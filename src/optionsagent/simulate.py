@@ -20,8 +20,9 @@ import math
 import statistics
 import tempfile
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta, timezone  # noqa: F401
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .brokers.paper import PaperBroker
 from .config import Config
@@ -115,7 +116,9 @@ class SimResult:
             "avg_win_pct": round(self.avg_win_pct, 4),
             "avg_loss_pct": round(self.avg_loss_pct, 4),
             "expectancy_per_trade": round(self.expectancy_per_trade, 4),
-            "profit_factor": round(self.profit_factor, 3) if self.profit_factor else None,
+            "profit_factor": round(self.profit_factor, 3)
+            if self.profit_factor is not None
+            else None,
             "mean_return": round(statistics.fmean(rets), 4) if rets else 0.0,
             "median_return": round(statistics.median(rets), 4) if rets else 0.0,
             "p05_return": round(self.percentile(0.05), 4),
@@ -142,6 +145,10 @@ def run_world(
     are, because the position gaps past the target between observations and
     "fills" at the gapped price rather than the target.
     """
+    if days <= 0 or steps_per_day <= 0:
+        raise ValueError("days and steps_per_day must be positive")
+    if config.data_provider != "synthetic":
+        raise ValueError("Synthetic simulation requires data_provider: synthetic")
     market = SyntheticMarketData(
         symbols=config.universe.symbols,
         seed=seed,
@@ -154,19 +161,23 @@ def run_world(
     # the first month is spent with no direction and no trades.
     for _ in range(45):
         market.step(1)
-        for sym in config.universe.symbols:
-            price = market.underlying_price(sym)
-            if price:
-                history.push(sym, price)
+        if _is_trading_day(market.today):
+            for sym in config.universe.symbols:
+                price = market.underlying_price(sym)
+                if price:
+                    history.push_daily(sym, price, market.today)
 
     intraday_step = 1.0 / steps_per_day
-    slot = {"i": 0}
+    slot = {"i": 0, "date": market.today}
 
     def clock() -> datetime:
         # Spread the intraday polls across the 6.5-hour session so that
         # ``days_held`` and the time stop advance smoothly.
         minutes = int(390 * (slot["i"] / steps_per_day))
-        return datetime.combine(market.today, time(9, 30), tzinfo=UTC) + timedelta(minutes=minutes)
+        return (
+            datetime.combine(slot["date"], time(9, 30), tzinfo=ZoneInfo(config.execution.timezone))
+            + timedelta(minutes=minutes)
+        ).astimezone(UTC)
 
     broker = PaperBroker(
         starting_equity=config.broker.starting_equity, seed=seed * 31 + 7, clock=clock
@@ -189,13 +200,19 @@ def run_world(
             if not _is_trading_day(market.today):
                 market.step(1)
                 continue
+            session_date = market.today
+            slot["date"] = session_date
             for i in range(steps_per_day):
                 slot["i"] = i
                 market.step(intraday_step)
+                # Quotes/DTE and decisions must refer to the same session.
+                market.today = session_date
                 engine.run_once(as_of=clock())
-            eq = broker.equity()
-            peak = max(peak, eq)
-            max_dd = min(max_dd, eq / peak - 1.0)
+                eq = broker.equity()
+                peak = max(peak, eq)
+                max_dd = min(max_dd, eq / peak - 1.0)
+            market.today = session_date + timedelta(days=1)
+            market._day_fraction = 0.0
         return broker.equity(), list(portfolio.trades), max_dd
 
 
@@ -209,6 +226,8 @@ def run_simulation(
     start: date | None = None,
     steps_per_day: int = 4,
 ) -> SimResult:
+    if worlds <= 0:
+        raise ValueError("worlds must be positive")
     start = start or date(2025, 1, 3)
     result = SimResult(
         label=label, worlds=worlds, days=days, starting_equity=config.broker.starting_equity

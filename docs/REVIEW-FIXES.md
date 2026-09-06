@@ -30,6 +30,7 @@ It must be refreshed within 24 hours and have a nonempty source. Example shape:
   "symbols": {
     "AAPL": {
       "daily_closes": [200.0, 201.0],
+      "daily_closes_as_of": "2026-09-04",
       "iv_rank": 0.4,
       "iv_history_days": 252,
       "earnings_checked": true,
@@ -39,7 +40,8 @@ It must be refreshed within 24 hours and have a nonempty source. Example shape:
 }
 ```
 
-Values above are illustrative, not market facts. Supply at least 30 completed daily
+Values above are illustrative, not market facts. Snapshot validation rejects unknown fields,
+nonfinite prices, ambiguous booleans and missing completed-session dates. Supply at least 30 completed daily
 bars for the signal. IV rank must use a historical daily ATM series (minimum 200
 observations), not different strikes from one chain. Null earnings with
 `earnings_checked: true` means the feed verified no upcoming event. The session

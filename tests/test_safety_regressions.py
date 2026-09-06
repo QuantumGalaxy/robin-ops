@@ -321,7 +321,19 @@ def test_cli_restart_restores_checkpoint_instead_of_resetting_account(tmp_path):
 def test_unknown_reference_data_blocks_live_data_filters():
     from optionsagent.marketdata.robinhood_mcp import RobinhoodMcpMarketData
 
-    data = RobinhoodMcpMarketData(FakeToolCaller())
+    data = RobinhoodMcpMarketData(
+        FakeToolCaller(
+            tools=[
+                {"name": n}
+                for n in (
+                    "get_equity_quotes",
+                    "get_option_chains",
+                    "get_option_instruments",
+                    "get_option_quotes",
+                )
+            ]
+        )
+    )
     assert data.iv_rank("AAPL") is None
     assert not data.earnings_known("AAPL")
     assert not data.is_market_open()

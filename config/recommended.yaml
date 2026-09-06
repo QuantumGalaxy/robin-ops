@@ -38,7 +38,8 @@ entry:
   # stock move than a cheap out-of-the-money one, and its spread is tighter.
   min_abs_delta: 0.55
   max_abs_delta: 0.70
-  # A round trip costs the spread twice. Above ~6% the +10% target is unreachable.
+  # Crossing ask on entry and bid on exit costs approximately one full spread.
+  # Keep spreads narrow relative to the target; this filter does not ensure profit.
   max_spread_pct: 0.06
   min_open_interest: 500
   min_volume: 25

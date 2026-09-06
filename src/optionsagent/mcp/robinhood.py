@@ -17,6 +17,7 @@ server actually offers against what this module assumes.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -76,13 +77,15 @@ def pick(row: dict[str, Any], *names: str, default: Any = None) -> Any:
 
 def as_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else default
     except (TypeError, ValueError):
         return default
 
 
 def as_int(value: Any, default: int = 0) -> int:
-    return int(as_float(value, default))
+    number = as_float(value, default)
+    return int(number) if float(number).is_integer() else default
 
 
 def as_date(value: Any) -> date | None:
@@ -104,7 +107,7 @@ class RobinhoodMcp:
 
     caller: ToolCaller
 
-    def verify_tools(self) -> list[str]:
+    def verify_tools(self, required=REQUIRED_TOOLS) -> list[str]:
         """Return the tools this agent needs that the account does not expose.
 
         Worth calling at startup: options access is a per-account entitlement, so
@@ -115,7 +118,7 @@ class RobinhoodMcp:
             available = {t.get("name") for t in self.caller.list_tools()}
         except Exception:
             raise RuntimeError("Cannot verify MCP capabilities; connection blocked") from None
-        return [name for name in REQUIRED_TOOLS if name not in available]
+        return [name for name in required if name not in available]
 
     # ---- account ---------------------------------------------------------
 

@@ -9,8 +9,8 @@ from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
 
-from .models import ExitReason, OptionContract, Position, TradeRecord
-from .orders import OrderRecord
+from .models import ExitReason, OptionContract, Position, TradeRecord, utcnow
+from .orders import OrderRecord, OrderState
 from .risk import RiskState
 
 
@@ -40,11 +40,16 @@ class RuntimeStore:
                 "kind TEXT, body TEXT)"
             )
 
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(self.path)
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA synchronous=FULL")
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def event(self, kind, body):
         with self.connect() as db:
@@ -56,6 +61,8 @@ class RuntimeStore:
     def save(self, engine):
         broker = engine.broker
         payload = {
+            "schema_version": 1,
+            "saved_at": utcnow(),
             "config": engine.config.model_dump(mode="json"),
             "positions": [asdict(p) for p in engine.portfolio.positions.values()],
             "trades": [asdict(t) for t in engine.portfolio.trades],
@@ -96,11 +103,17 @@ class RuntimeStore:
     def restore(self, engine):
         data = self.read()
         if data is None:
-            if engine.portfolio.positions:
+            if (
+                engine.portfolio.positions
+                or engine.portfolio.trades
+                or engine.portfolio.realized_pnl
+            ):
                 raise RuntimeError(
                     "Legacy holdings need explicit migration; refusing to reset cash"
                 )
             return False
+        if data.get("schema_version", 1) != 1:
+            raise RuntimeError("Unsupported checkpoint schema")
         old = data["config"]
         if (
             old["broker"]["kind"] != engine.config.broker.kind
@@ -122,12 +135,24 @@ class RuntimeStore:
             risk["session_date"] = date.fromisoformat(risk["session_date"])
         engine.risk.state = RiskState(**risk)
         engine.reconcile_halt = data["reconcile_halt"]
+        journal = engine.orders.orders
         engine.orders.orders = {k: OrderRecord(**r) for k, r in data["orders"].items()}
+        for key, record in journal.items():
+            saved_record = engine.orders.orders.get(key)
+            if (
+                saved_record is None or record.updated_at > saved_record.updated_at
+            ) and record.state != OrderState.FAILED:
+                record.state = OrderState.PENDING
+                record.detail = "journal newer than checkpoint; recovery required"
+                engine.orders.orders[key] = record
         engine.orders.save()
         for symbol, values in data["history"].items():
-            for value in values:
-                engine.history.push(symbol, value)
+            engine.history.replace(symbol, values)
         engine.history._dates = {s: date.fromisoformat(d) for s, d in data["history_dates"].items()}
+
+        def tuples(x):
+            return tuple(map(tuples, x)) if isinstance(x, list) else x
+
         if "paper" in data:
             b = engine.broker
             paper = data["paper"]
@@ -135,9 +160,6 @@ class RuntimeStore:
             b._positions = {p.contract.occ_symbol: p for p in map(position, paper["positions"])}
             b._marks = paper["marks"]
             b._day_trades = [date.fromisoformat(d) for d in paper["day_trades"]]
-
-            def tuples(x):
-                return tuple(map(tuples, x)) if isinstance(x, list) else x
 
             b._rng.setstate(tuples(paper["rng"]))
         if "synthetic" in data:
@@ -153,7 +175,7 @@ class RuntimeStore:
                 if raw["earnings"]:
                     raw["earnings"] = date.fromisoformat(raw["earnings"])
                 market.state[symbol] = SymbolState(**raw)
-        pf.save()
+        pf.persist = False
         return True
 
 

@@ -9,6 +9,7 @@ entirely, which is what actually happens with resting limit orders.
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -77,7 +78,14 @@ class PaperBroker(Broker):
         return round(max(0.01, quote.mid - half * aggression), 2)
 
     def buy_to_open(self, quote: OptionQuote, quantity: int, limit_price: float) -> Fill | None:
-        if quantity <= 0 or not quote.is_tradeable():
+        if (
+            not isinstance(quantity, int)
+            or isinstance(quantity, bool)
+            or quantity <= 0
+            or not quote.is_tradeable()
+            or not math.isfinite(limit_price)
+            or limit_price <= 0
+        ):
             return None
         if self._rng.random() < self.miss_probability:
             return None
@@ -119,6 +127,14 @@ class PaperBroker(Broker):
     def sell_to_close(
         self, position: Position, quote: OptionQuote, limit_price: float, urgent: bool = False
     ) -> Fill | None:
+        if (
+            not quote.is_tradeable()
+            or quote.contract.occ_symbol != position.contract.occ_symbol
+            or not math.isfinite(limit_price)
+            or limit_price <= 0
+            or position.quantity <= 0
+        ):
+            return None
         key = position.contract.occ_symbol
         held = self._positions.get(key)
         if held is None:
@@ -126,7 +142,7 @@ class PaperBroker(Broker):
         if not urgent and self._rng.random() < self.miss_probability:
             return None
         price = self._fill_price(quote, Side.SELL, urgent)
-        if not urgent and price < limit_price:
+        if price < limit_price:
             return None
         qty = min(position.quantity, held.quantity)
         fees = REGULATORY_FEE_PER_CONTRACT * qty
@@ -146,9 +162,8 @@ class PaperBroker(Broker):
     def settle_expiration(self, position: Position, intrinsic_per_share: float) -> float:
         """Settle an expired contract at intrinsic value and remove it.
 
-        In-the-money contracts are assumed to be auto-exercised and the shares
-        immediately liquidated, which is close enough to how a broker handles an
-        account that cannot afford assignment.
+        Synthetic-only cash settlement convention. This does not model real
+        exercise, assignment, share delivery, or broker liquidation policy.
         """
         key = position.contract.occ_symbol
         held = self._positions.pop(key, None)

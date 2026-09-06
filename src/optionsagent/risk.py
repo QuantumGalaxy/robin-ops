@@ -8,6 +8,7 @@ The rule is that risk checks can only ever *block* entries, never block an exit.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -54,6 +55,8 @@ class RiskManager:
         return Path(self.cfg.kill_switch_file).exists()
 
     def can_open(self, equity: float, day_trades_used: int) -> tuple[bool, str]:
+        if not math.isfinite(equity) or equity <= 0 or day_trades_used < 0:
+            return False, "invalid account risk inputs"
         if self.kill_switch_engaged():
             return False, f"kill switch present at {self.cfg.kill_switch_file}"
         if self.state.halted_reason:

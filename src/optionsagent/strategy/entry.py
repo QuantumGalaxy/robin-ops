@@ -110,7 +110,11 @@ class EntryScreener:
             and 0 <= days_to_earnings <= self.cfg.avoid_earnings_within_days
         ):
             return []
-        if iv_rank is None or not math.isfinite(iv_rank) or iv_rank > self.cfg.max_iv_rank:
+        if (
+            iv_rank is None
+            or not math.isfinite(iv_rank)
+            or not 0 <= iv_rank <= self.cfg.max_iv_rank
+        ):
             return []
 
         out: list[Candidate] = []
@@ -151,6 +155,12 @@ class EntryScreener:
             return None
 
         g = q.greeks
+        if not all(math.isfinite(v) for v in (g.price, g.delta, g.gamma, g.theta, g.vega, g.iv)):
+            return None
+        if g.price <= 0 or g.iv <= 0 or g.gamma < 0:
+            return None
+        if (c.right == "call" and g.delta <= 0) or (c.right == "put" and g.delta >= 0):
+            return None
         abs_delta = abs(g.delta)
         if not (self.cfg.min_abs_delta <= abs_delta <= self.cfg.max_abs_delta):
             return None

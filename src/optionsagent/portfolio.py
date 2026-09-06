@@ -31,6 +31,7 @@ class Portfolio:
     positions: dict[str, Position] = field(default_factory=dict)
     trades: list[TradeRecord] = field(default_factory=list)
     realized_pnl: float = 0.0
+    persist: bool = True
 
     def __post_init__(self) -> None:
         self.state_dir = Path(self.state_dir)
@@ -143,10 +144,14 @@ class Portfolio:
     # ---- persistence -----------------------------------------------------
 
     def _append_trade(self, record: TradeRecord) -> None:
+        if not self.persist:
+            return
         with self.trade_log.open("a") as fh:
             fh.write(json.dumps(record.to_dict()) + "\n")
 
     def save(self) -> None:
+        if not self.persist:
+            return
         payload = {
             "saved_at": utcnow().isoformat(),
             "realized_pnl": self.realized_pnl,

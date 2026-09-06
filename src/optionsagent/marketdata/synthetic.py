@@ -20,6 +20,7 @@ The model is deliberately simple but not naive:
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 from dataclasses import dataclass, field
@@ -135,7 +136,9 @@ class SyntheticMarketData(MarketDataProvider):
         routinely "fills" at +50% because the mark gapped straight past it
         overnight, which flatters any take-profit rule enormously.
         """
-        dt = days / 252.0
+        if not math.isfinite(days) or days < 0:
+            raise ValueError("Synthetic time must advance by a finite nonnegative amount")
+        dt = days / 365.0
         for st in self.state.values():
             # Prices realise less volatility than options imply. Contracts are
             # quoted off st.iv, but the path is generated with realised vol.
@@ -185,7 +188,9 @@ class SyntheticMarketData(MarketDataProvider):
         st = self.state.get(symbol)
         if st is None:
             return []
-        rng = random.Random(hash((self.seed, symbol)) & 0xFFFFFFFF)
+        rng = random.Random(
+            int.from_bytes(hashlib.sha256(f"{self.seed}|{symbol}".encode()).digest()[:8])
+        )
         dt = 1 / 252.0
         path = [st.spot]
         price = st.spot

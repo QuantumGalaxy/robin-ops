@@ -7,6 +7,7 @@ import logging
 from datetime import UTC, datetime, time
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import typer
 from rich.console import Console
@@ -304,11 +305,17 @@ def simulate(
 
     row("Trades per world", lambda r: f"{r.trades / max(r.worlds, 1):.1f}")
     row("Win rate", lambda r: f"{r.win_rate:.1%}")
-    row("Break-even win rate needed", lambda r: f"{breakeven_win_rate(0.10, -0.50):.1%}")
+    row(
+        "Break-even from observed win/loss sizes",
+        lambda r: f"{breakeven_win_rate(r.avg_win_pct, r.avg_loss_pct):.1%}" if r.trades else "n/a",
+    )
     row("Average win", lambda r: f"{r.avg_win_pct:+.1%}")
     row("Average loss", lambda r: f"{r.avg_loss_pct:+.1%}")
     row("Expectancy per trade", lambda r: f"{r.expectancy_per_trade:+.2%}")
-    row("Profit factor", lambda r: f"{r.profit_factor:.2f}" if r.profit_factor else "n/a")
+    row(
+        "Profit factor",
+        lambda r: f"{r.profit_factor:.2f}" if r.profit_factor is not None else "n/a",
+    )
     row("Median account return", lambda r: f"{r.as_dict()['median_return']:+.1%}")
     row("5th percentile", lambda r: f"{r.percentile(0.05):+.1%}")
     row("95th percentile", lambda r: f"{r.percentile(0.95):+.1%}")
@@ -340,7 +347,7 @@ def run(
     config: ConfigOpt = None,
     loops: int = typer.Option(1, help="Number of loop iterations. Use -1 to run continuously."),
     live: bool = typer.Option(
-        False, "--live", help="Route orders to the configured broker for real."
+        False, "--live", help="Reserved; live execution is disabled in this release."
     ),
     advance_days: int = typer.Option(
         0,
@@ -350,9 +357,11 @@ def run(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run the agent loop. Paper trading unless --live is passed."""
+    """Run the paper agent. Live execution is disabled."""
     _setup_logging(verbose)
     cfg = _load(config)
+    if loops < -1 or advance_days < 0:
+        raise typer.BadParameter("loops must be -1 or nonnegative; advance-days cannot be negative")
 
     if live or cfg.mode in (Mode.LIVE_APPROVAL, Mode.LIVE_AUTO):
         raise typer.BadParameter(
@@ -388,6 +397,8 @@ def run(
             while loops < 0 or count < loops:
                 if hasattr(data, "step"):
                     data.step(advance_days or 1)
+                    while data.today.weekday() >= 5:
+                        data.step(1)
                 try:
                     report = engine.run_once(as_of=_sim_now(data))
                     console.print(f"[cyan]loop {count + 1}[/cyan]: {report.describe()}")
@@ -398,7 +409,11 @@ def run(
                     )
                     store.event("error", {"type": type(exc).__name__, "message": str(exc)})
                     engine._checkpoint()
-                    raise
+                    from .mcp.client import McpError
+
+                    if loops >= 0 or not isinstance(exc, (OSError, McpError)):
+                        raise
+                    console.print("Data connection failed; entries halted, monitoring will retry.")
                 count += 1
                 if loops < 0:
                     wall_time.sleep(cfg.execution.poll_interval_seconds)
@@ -412,7 +427,7 @@ def _sim_now(data) -> datetime | None:
     today = getattr(data, "today", None)
     if today is None:
         return None
-    return datetime.combine(today, time(15, 0), tzinfo=UTC)
+    return datetime.combine(today, time(15, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(UTC)
 
 
 @app.command()
@@ -434,12 +449,14 @@ def status(config: ConfigOpt = None) -> None:
             row["closed_at"] = datetime.fromisoformat(row["closed_at"])
             row["reason"] = ExitReason(row["reason"])
             pf.trades.append(TradeRecord(**row))
+        halt = snapshot.get("reconcile_halt") or snapshot["risk"].get("halted_reason") or "none"
         console.print(
             Panel(
                 f"Mode: {snapshot['config']['mode']} | "
                 f"Data: {snapshot['config']['data_provider']}\n"
                 f"Simulated cash: ${snapshot.get('paper', {}).get('cash', 0):,.2f}\n"
-                f"Entry halt: {snapshot.get('reconcile_halt') or 'none'}",
+                f"Entry halt: {halt}\n"
+                f"Saved: {snapshot.get('saved_at', 'unknown')}",
                 title="Options Agent",
             )
         )
@@ -540,6 +557,9 @@ def dashboard(config: ConfigOpt = None) -> None:
         )
         pending = [o for o in data.get("orders", {}).values() if o["state"] == "pending"]
         status += f" | Pending orders: {len(pending)}"
+        status += f"\nSaved: {data.get('saved_at', 'unknown')}"
+        if Path(cfg.risk.kill_switch_file).exists():
+            status += " | OPERATOR PAUSE"
         activity = "\n".join(f"{at} {kind}: {body}" for at, kind, body in events)
         return Group(
             Panel(status, title="Options Agent — Simulation"),
@@ -554,6 +574,24 @@ def dashboard(config: ConfigOpt = None) -> None:
                 live_view.update(render())
     except KeyboardInterrupt:
         pass
+
+
+@app.command()
+def pause(config: ConfigOpt = None) -> None:
+    """Pause entries; held-position monitoring continues."""
+    cfg = _load(config)
+    path = Path(cfg.risk.kill_switch_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    console.print("New entries paused. Position monitoring continues.")
+
+
+@app.command()
+def resume(config: ConfigOpt = None) -> None:
+    """Remove the operator pause; risk/reconciliation halts remain enforced."""
+    cfg = _load(config)
+    Path(cfg.risk.kill_switch_file).unlink(missing_ok=True)
+    console.print("Operator pause removed. Data, risk and reconciliation checks still apply.")
 
 
 @app.command("init-config")

@@ -9,16 +9,18 @@ Each pass does the same four things, in this order and never a different one:
    a losing position;
 4. scan for new entries, if and only if risk limits allow it.
 
-The loop is synchronous and stateless between passes apart from the persisted
-portfolio, which makes it safe to kill and restart at any point.
+The loop is synchronous. The runtime checkpoint restores paper-account, risk,
+order and strategy state; ambiguous crash-window orders require recovery.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -53,6 +55,7 @@ class LoopReport:
 
     blocked_reason: str = ""
     reconcile_mismatch: str = ""
+    errors: list[str] = field(default_factory=list)
 
     def describe(self) -> str:
         bits = [f"equity ${self.equity:,.0f}"]
@@ -92,6 +95,9 @@ class TradingEngine:
     """
 
     def __post_init__(self) -> None:
+        Config.model_validate(self.config.model_dump())
+        if self.store:
+            self.portfolio.persist = False
         if self.config.mode in (Mode.LIVE_APPROVAL, Mode.LIVE_AUTO):
             raise RuntimeError(
                 "Live trading disabled pending verified broker lifecycle integration"
@@ -112,9 +118,10 @@ class TradingEngine:
     def warmup(self, days: int = 90) -> None:
         """Seed the signal with historical closes so the first loop can trade."""
         for symbol in self.config.universe.symbols:
-            closes = self.data.historical_closes(symbol, days)
-            for price in closes:
-                self.history.push(symbol, price)
+            try:
+                self.history.replace(symbol, self.data.historical_closes(symbol, days))
+            except Exception:
+                log.exception("warmup unavailable for %s; entries will remain unqualified", symbol)
         log.info("warmed up price history for %d symbols", len(self.config.universe.symbols))
 
     # ---- main loop -------------------------------------------------------
@@ -136,7 +143,7 @@ class TradingEngine:
         )
         report = LoopReport(at=now, equity=equity)
         if self.config.mode is Mode.SCAN_ONLY:
-            self._refresh_history(now)
+            self._refresh_history(now, report)
             self._scan_entries(now, report, dry=True)
             report.blocked_reason = "scan-only: no order or position mutations"
             self._checkpoint(report)
@@ -146,11 +153,13 @@ class TradingEngine:
         self._reconcile(report)
         self._settle_expirations(now, report)
         self._manage_exits(now, report)
-        self._refresh_history(now)
+        self._refresh_history(now, report)
         equity = self.broker.equity()
         allowed, reason = self.risk.can_open(equity, self.broker.day_trades_used())
         if self.reconcile_halt:
             report.blocked_reason = self.reconcile_halt
+        elif report.errors:
+            report.blocked_reason = "data/monitoring failure: " + "; ".join(report.errors)
         elif self.orders.pending():
             report.blocked_reason = "unresolved order: reconciliation required"
         elif allowed:
@@ -198,19 +207,23 @@ class TradingEngine:
 
     # ---- steps -----------------------------------------------------------
 
-    def _refresh_history(self, now: datetime) -> None:
+    def _refresh_history(self, now: datetime, report: LoopReport | None = None) -> None:
         for symbol in self.config.universe.symbols:
             try:
                 # Daily strategy: refresh completed daily bars, never append minute polls.
                 if self.config.data_provider != "synthetic":
                     closes = self.data.historical_closes(symbol, 90)
-                    if closes:
-                        self.history.replace(symbol, closes)
+                    self.history.replace(symbol, closes)
+                    if not closes and report:
+                        report.errors.append(f"{symbol}: completed daily bars unavailable")
                 else:
                     price = self.data.underlying_price(symbol)
                     if price:
                         self.history.push_daily(symbol, price, now.date())
             except Exception:
+                self.history.replace(symbol, [])
+                if report:
+                    report.errors.append(f"{symbol}: history refresh failed")
                 log.exception("history refresh failed for %s", symbol)
 
     def _quote_for(self, position: Position) -> OptionQuote | None:
@@ -228,13 +241,20 @@ class TradingEngine:
         for key, position in list(self.portfolio.positions.items()):
             if position.contract.days_to_expiry(now.date()) >= 0:
                 continue
-            if not isinstance(self.broker, PaperBroker):
+            if not isinstance(self.broker, PaperBroker) or self.config.data_provider != "synthetic":
                 self.reconcile_halt = (
-                    "expired live position requires broker exercise reconciliation"
+                    "expired position needs a verified expiration settlement; "
+                    "current spot is not settlement"
                 )
                 continue
-            spot = self.data.underlying_price(position.contract.symbol)
-            if spot is None or spot <= 0:
+            actual = {p.contract.occ_symbol: p for p in self.broker.positions()}.get(key)
+            if actual is None or actual.quantity != position.quantity:
+                continue
+            try:
+                spot = self.data.underlying_price(position.contract.symbol)
+            except Exception:
+                spot = None
+            if spot is None or not math.isfinite(spot) or spot <= 0:
                 self.reconcile_halt = "expired position has no valid settlement reference"
                 continue
             value = intrinsic(spot, position.contract.strike, position.contract.right)
@@ -264,6 +284,7 @@ class TradingEngine:
         actual = {p.contract.occ_symbol: p for p in self.broker.positions()}
         expected = self.portfolio.positions
         mismatches = []
+        self._unverified_positions = set()
         for key in actual.keys() | expected.keys():
             if key not in expected:
                 mismatches.append(f"broker-only holding {key}")
@@ -271,6 +292,11 @@ class TradingEngine:
                 mismatches.append(f"ledger-only holding {key}")
             elif expected[key].quantity != actual[key].quantity:
                 mismatches.append(f"quantity mismatch {key}")
+        self._unverified_positions = {
+            key
+            for key in expected
+            if key not in actual or expected[key].quantity != actual[key].quantity
+        }
         if mismatches:
             self.reconcile_halt = "; ".join(mismatches)
             report.reconcile_mismatch = self.reconcile_halt
@@ -284,12 +310,22 @@ class TradingEngine:
                 self.store.event("monitor_wait", {"reason": "market session unverified or closed"})
             return
         for key, position in list(self.portfolio.positions.items()):
+            if (
+                key in getattr(self, "_unverified_positions", set())
+                or position.contract.days_to_expiry(now.date()) < 0
+            ):
+                continue
             try:
                 quote = self._quote_for(position)
             except Exception:
+                report.errors.append(f"{position.contract}: held quote refresh failed")
                 log.exception("quote refresh failed for held %s", position.contract)
                 continue
-            if not self._usable(quote, now):
+            if (
+                not self._usable(quote, now)
+                or quote.contract.occ_symbol != position.contract.occ_symbol
+            ):
+                report.errors.append(f"{position.contract}: held quote missing or stale")
                 log.warning("no usable quote for %s; will retry next loop", position.contract)
                 continue
             if hasattr(self.broker, "mark"):
@@ -297,9 +333,16 @@ class TradingEngine:
 
             try:
                 earnings = self.data.next_earnings_date(position.contract.symbol)
-                direction, _ = self.signal.direction(position.contract.symbol, self.history)
+                symbol = position.contract.symbol
+                if self.config.data_provider != "synthetic":
+                    self.history.replace(symbol, self.data.historical_closes(symbol, 90))
+                current = PriceHistory()
+                current.replace(symbol, self.history.get(symbol))
+                current.push(symbol, quote.underlying_price)
+                direction, _ = self.signal.direction(symbol, current)
             except Exception:
-                earnings, direction = None, "none"
+                earnings, direction = None, None
+                report.errors.append(f"{position.contract}: signal/event refresh failed")
             decision = evaluate_exit(
                 position,
                 quote,
@@ -327,6 +370,7 @@ class TradingEngine:
             try:
                 fill = self._sell_with_reprice(position, quote, urgent)
             except Exception:
+                report.errors.append(f"{position.contract}: exit submission uncertain")
                 log.exception("exit submission uncertain for %s", position.contract)
                 continue
             if fill is None:
@@ -378,7 +422,6 @@ class TradingEngine:
             report.blocked_reason = f"at max positions ({cfg.sizing.max_positions})"
             return
 
-        equity = self.broker.equity()
         for symbol in cfg.universe.symbols:
             if not dry:
                 allowed, reason = self.risk.can_open(
@@ -389,112 +432,126 @@ class TradingEngine:
                     break
             if len(self.portfolio.positions) >= cfg.sizing.max_positions:
                 break
-            if self.portfolio.count_for_symbol(symbol) >= cfg.sizing.max_positions_per_symbol:
+            if self.portfolio.count_for_symbol(symbol) >= 1:
                 continue
 
-            direction, confidence = self.signal.direction(symbol, self.history)
-            if direction == "none":
-                continue
+            try:
+                self._scan_symbol(symbol, now, report, dry, self.broker.equity())
+            except Exception:
+                report.errors.append(f"{symbol}: entry scan failed")
+                report.blocked_reason = f"{symbol}: entry scan failed"
+                if self.store:
+                    self.store.event("scan_error", {"symbol": symbol})
+                log.exception("entry scan failed for %s", symbol)
+                break
 
-            quotes = self.data.option_chain(symbol, cfg.entry.min_dte, cfg.entry.max_dte)
-            if not quotes:
-                continue
+    def _scan_symbol(self, symbol, now, report, dry, equity):
+        cfg = self.config
+        direction, confidence = self.signal.direction(symbol, self.history)
+        if direction == "none":
+            report.skipped.append(f"{symbol}: neutral or insufficient direction history")
+            return
 
-            quotes = [q for q in quotes if self._usable(q, now)]
-            if cfg.entry.require_known_events and not self.data.earnings_known(symbol):
-                report.skipped.append(f"{symbol}: earnings calendar unavailable")
-                continue
-            earnings = self.data.next_earnings_date(symbol)
-            days_to_earnings = (earnings - now.date()).days if earnings else None
-            candidates = self.screener.screen(
-                quotes,
-                direction,
-                iv_rank=self.data.iv_rank(symbol),
-                days_to_earnings=days_to_earnings,
-                confidence=confidence,
-                as_of=now.date(),
+        quotes = self.data.option_chain(symbol, cfg.entry.min_dte, cfg.entry.max_dte)
+        if not quotes:
+            report.skipped.append(f"{symbol}: no option quotes in the DTE range")
+            return
+
+        quotes = [q for q in quotes if q.contract.symbol == symbol and self._usable(q, now)]
+        if cfg.entry.require_known_events and not self.data.earnings_known(symbol):
+            report.skipped.append(f"{symbol}: earnings calendar unavailable")
+            return
+        earnings = self.data.next_earnings_date(symbol)
+        days_to_earnings = (earnings - now.date()).days if earnings else None
+        candidates = self.screener.screen(
+            quotes,
+            direction,
+            iv_rank=self.data.iv_rank(symbol),
+            days_to_earnings=days_to_earnings,
+            confidence=confidence,
+            as_of=now.date(),
+        )
+        if not candidates:
+            report.skipped.append(f"{symbol}: no contract passed screening")
+            return
+
+        # Walk down the ranked list rather than skipping the symbol when the
+        # top pick is unaffordable. On a small account the best-scoring
+        # contract on an expensive underlying routinely costs more than the
+        # per-trade risk budget allows, and the second choice is usually
+        # only marginally worse.
+        best = None
+        sizing = None
+        for cand in candidates[: self.max_candidates_considered]:
+            trial = size_position(
+                cand.quote,
+                equity,
+                self.broker.buying_power(),
+                self.portfolio.open_premium(),
+                cfg.sizing,
+                stop_loss_pct=cfg.exit.stop_loss_pct,
             )
-            if not candidates:
-                report.skipped.append(f"{symbol}: no contract passed screening")
-                continue
-
-            # Walk down the ranked list rather than skipping the symbol when the
-            # top pick is unaffordable. On a small account the best-scoring
-            # contract on an expensive underlying routinely costs more than the
-            # per-trade risk budget allows, and the second choice is usually
-            # only marginally worse.
-            best = None
-            sizing = None
-            for cand in candidates[: self.max_candidates_considered]:
-                trial = size_position(
-                    cand.quote,
-                    equity,
-                    self.broker.buying_power(),
-                    self.portfolio.open_premium(),
-                    cfg.sizing,
-                    stop_loss_pct=cfg.exit.stop_loss_pct,
-                )
-                if trial.contracts > 0:
-                    best, sizing = cand, trial
-                    break
-            if best is None or sizing is None:
-                report.skipped.append(
-                    f"{symbol}: no candidate fits the per-trade budget "
-                    f"(cheapest ranked contract ${candidates[-1].quote.ask * 100:,.0f})"
-                )
-                continue
-
-            if dry:
-                report.candidates.append(
-                    f"{best.contract} x{sizing.contracts} @ ~${best.quote.mid:.2f} | "
-                    + "; ".join(best.reasons)
-                )
-                continue
-
-            if self.store:
-                self.store.event(
-                    "entry_decision",
-                    {
-                        "contract": str(best.contract),
-                        "quote_at": best.quote.as_of,
-                        "bid": best.quote.bid,
-                        "ask": best.quote.ask,
-                        "quantity": sizing.contracts,
-                        "reasons": best.reasons,
-                    },
-                )
-            fill = self._buy_with_reprice(best.quote, sizing.contracts, now)
-            if fill is None:
-                report.skipped.append(
-                    f"{symbol}: entry did not fill within the slippage budget "
-                    f"(bid ${best.quote.bid:.2f} / ask ${best.quote.ask:.2f})"
-                )
-                continue
-
-            g = best.quote.greeks
-            position = Position(
-                contract=best.contract,
-                quantity=fill.quantity,
-                entry_price=fill.price,
-                opened_at=now,
-                entry_underlying=best.quote.underlying_price,
-                entry_iv=g.iv if g else 0.0,
-                entry_delta=g.delta if g else 0.0,
-                last_mark=fill.price,
-                entry_fees=fill.fees,
-                broker_order_id=fill.order_id,
-                notes="; ".join(best.reasons),
+            if trial.contracts > 0:
+                best, sizing = cand, trial
+                break
+        if best is None or sizing is None:
+            report.skipped.append(
+                f"{symbol}: no candidate fits the per-trade budget "
+                f"(cheapest ranked contract ${candidates[-1].quote.ask * 100:,.0f})"
             )
-            self.portfolio.add(position)
-            self._checkpoint()
-            log.info(
-                "opened %s x%d @ $%.2f | %s",
-                best.contract,
-                sizing.contracts,
-                fill.price,
-                "; ".join(best.reasons),
+            return
+
+        if dry:
+            report.candidates.append(
+                f"{best.contract} x{sizing.contracts} @ ~${best.quote.mid:.2f} | "
+                + "; ".join(best.reasons)
             )
-            report.opened.append(f"{best.contract} x{sizing.contracts} @ ${fill.price:.2f}")
+            return
+
+        if self.store:
+            self.store.event(
+                "entry_decision",
+                {
+                    "contract": str(best.contract),
+                    "quote_at": best.quote.as_of,
+                    "bid": best.quote.bid,
+                    "ask": best.quote.ask,
+                    "quantity": sizing.contracts,
+                    "reasons": best.reasons,
+                },
+            )
+        fill = self._buy_with_reprice(best.quote, sizing.contracts, now)
+        if fill is None:
+            report.skipped.append(
+                f"{symbol}: entry did not fill within the slippage budget "
+                f"(bid ${best.quote.bid:.2f} / ask ${best.quote.ask:.2f})"
+            )
+            return
+
+        g = best.quote.greeks
+        position = Position(
+            contract=best.contract,
+            quantity=fill.quantity,
+            entry_price=fill.price,
+            opened_at=now,
+            entry_underlying=best.quote.underlying_price,
+            entry_iv=g.iv if g else 0.0,
+            entry_delta=g.delta if g else 0.0,
+            last_mark=fill.price,
+            entry_fees=fill.fees,
+            broker_order_id=fill.order_id,
+            notes="; ".join(best.reasons),
+        )
+        self.portfolio.add(position)
+        self._checkpoint()
+        log.info(
+            "opened %s x%d @ $%.2f | %s",
+            best.contract,
+            sizing.contracts,
+            fill.price,
+            "; ".join(best.reasons),
+        )
+        report.opened.append(f"{best.contract} x{sizing.contracts} @ ${fill.price:.2f}")
 
     # ---- pricing helpers -------------------------------------------------
 
@@ -507,7 +564,9 @@ class TradingEngine:
         """
         if concession is None:
             concession = self.config.execution.entry_limit_offset
-        return round(min(quote.ask, quote.mid + (quote.spread / 2.0) * concession), 2)
+        cap = quote.mid * (1 + self.config.execution.max_slippage_pct)
+        price = min(quote.ask, cap, quote.mid + (quote.spread / 2.0) * concession)
+        return float(Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
 
     def _exit_limit(
         self, quote: OptionQuote, urgent: bool, concession: float | None = None
@@ -516,7 +575,9 @@ class TradingEngine:
             return round(quote.bid, 2)
         if concession is None:
             concession = self.config.execution.exit_limit_offset
-        return round(max(quote.bid, quote.mid - (quote.spread / 2.0) * concession), 2)
+        floor = quote.mid * (1 - self.config.execution.max_slippage_pct)
+        price = max(quote.bid, floor, quote.mid - (quote.spread / 2.0) * concession)
+        return float(Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_CEILING))
 
     def _concession_ladder(self, start: float) -> list[float]:
         """Limit prices to try, walking from ``start`` toward the far touch.
@@ -527,7 +588,7 @@ class TradingEngine:
         agent never blindly pays the ask.
         """
         attempts = max(1, self.config.execution.reprice_attempts)
-        ceiling = min(1.0, start + self.config.execution.max_slippage_pct / 0.05)
+        ceiling = 1.0
         if attempts == 1:
             return [start]
         step = (ceiling - start) / (attempts - 1)

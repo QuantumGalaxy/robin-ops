@@ -13,17 +13,19 @@ implementation means the paper and live paths cannot diverge numerically.
 
 from __future__ import annotations
 
-import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from ..greeks import compute_greeks, implied_vol, years_to_expiry
 from ..mcp.client import ToolCaller
 from ..mcp.robinhood import RobinhoodMcp, as_date, as_float, as_int, pick
 from ..models import OptionContract, OptionQuote
 from .base import MarketDataProvider
+from .reference import ReferenceSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -37,26 +39,38 @@ class RobinhoodMcpMarketData(MarketDataProvider):
     risk_free_rate: float = 0.042
     dividend_yield: float = 0.0
     _instruments: dict[str, list[dict]] = field(default_factory=dict, init=False)
-    _iv_history: dict[str, list[float]] = field(default_factory=dict, init=False)
+    _spot_times: dict[str, datetime] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self.api = RobinhoodMcp(self.caller)
-        missing = self.api.verify_tools()
-        if missing:
-            log.error(
-                "the connected account does not expose: %s. Options tools require level 2 "
-                "approval; call get_option_level_upgrade_info for the application link.",
-                ", ".join(missing),
+        missing = self.api.verify_tools(
+            (
+                "get_equity_quotes",
+                "get_option_chains",
+                "get_option_instruments",
+                "get_option_quotes",
             )
+        )
+        if missing:
+            raise RuntimeError("Missing market-data MCP tools: " + ", ".join(missing))
 
     @staticmethod
     def _today() -> date:
-        return datetime.now().date()
+        return datetime.now(ZoneInfo("America/New_York")).date()
 
     # ---- underlying ------------------------------------------------------
 
     def underlying_price(self, symbol: str) -> float | None:
         row = self.api.equity_quote(symbol)
+        try:
+            stamp = datetime.fromisoformat(
+                str(pick(row, "updated_at", "as_of", "timestamp")).replace("Z", "+00:00")
+            )
+            if stamp.tzinfo is None or not -5 <= (datetime.now(UTC) - stamp).total_seconds() <= 120:
+                return None
+        except (ValueError, TypeError):
+            return None
+        self._spot_times[symbol] = stamp
         price = as_float(pick(row, "last_trade_price", "last_price", "price", "mark_price", "mark"))
         if price <= 0:
             bid = as_float(pick(row, "bid_price", "bid"))
@@ -69,8 +83,9 @@ class RobinhoodMcpMarketData(MarketDataProvider):
         # Timestamped reference feed contains completed daily bars only.
         reference = self._reference().get("symbols", {}).get(symbol, {})
         closes = reference.get("daily_closes", [])
-        if closes:
-            return [float(c) for c in closes[-days:] if float(c) > 0]
+        last_date = as_date(reference.get("daily_closes_as_of"))
+        if closes and last_date and 1 <= (self._today() - last_date).days <= 7:
+            return list(closes[-days:])
         return []
 
     # ---- option chain ----------------------------------------------------
@@ -97,7 +112,12 @@ class RobinhoodMcpMarketData(MarketDataProvider):
     def _build_quote(self, row: dict, contract: OptionContract, spot: float) -> OptionQuote | None:
         bid = as_float(pick(row, "bid_price", "bid"))
         ask = as_float(pick(row, "ask_price", "ask"))
-        if bid <= 0 or ask <= 0 or ask < bid:
+        if (
+            not all(math.isfinite(v) for v in (bid, ask, spot))
+            or bid <= 0
+            or spot <= 0
+            or ask < bid
+        ):
             return None
 
         stamp = pick(row, "updated_at", "as_of", "timestamp")
@@ -105,8 +125,9 @@ class RobinhoodMcpMarketData(MarketDataProvider):
             at = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         except ValueError:
             return None
-        if at.tzinfo is None:
+        if at.tzinfo is None or (at - datetime.now(UTC)).total_seconds() > 5:
             return None
+        at = min(at, self._spot_times.get(contract.symbol, at))
         quote = OptionQuote(
             as_of=at,
             contract=contract,
@@ -126,9 +147,7 @@ class RobinhoodMcpMarketData(MarketDataProvider):
             self.dividend_yield,
             contract.right,
         )
-        if iv is None:
-            iv = as_float(pick(row, "implied_volatility", "iv"))
-        if iv > 0:
+        if iv is not None and math.isfinite(iv) and iv > 0:
             quote.greeks = compute_greeks(
                 spot,
                 contract.strike,
@@ -138,7 +157,6 @@ class RobinhoodMcpMarketData(MarketDataProvider):
                 self.dividend_yield,
                 contract.right,
             )
-            self._iv_history.setdefault(contract.symbol, []).append(iv)
         return quote
 
     def option_chain(self, symbol: str, min_dte: int, max_dte: int) -> list[OptionQuote]:
@@ -194,8 +212,14 @@ class RobinhoodMcpMarketData(MarketDataProvider):
                 symbol=symbol, expiry=expiry, strike=strike, right=right, broker_id=instrument_id
             )
             quotes = self.api.option_quotes([instrument_id])
-            if quotes:
-                return self._build_quote(quotes[0], contract, spot)
+            for item in quotes:
+                returned_id = (
+                    str(pick(item, "instrument_id", "id", "option_id", "instrument", default=""))
+                    .rstrip("/")
+                    .rsplit("/", 1)[-1]
+                )
+                if returned_id == instrument_id:
+                    return self._build_quote(item, contract, spot)
         return None
 
     def _reference(self) -> dict:
@@ -203,7 +227,9 @@ class RobinhoodMcpMarketData(MarketDataProvider):
         if not self.reference_data_file:
             return {}
         try:
-            data = json.loads(Path(self.reference_data_file).read_text())
+            data = ReferenceSnapshot.model_validate_json(
+                Path(self.reference_data_file).read_text()
+            ).model_dump(mode="json")
             stamp = datetime.fromisoformat(data["as_of"].replace("Z", "+00:00"))
             age = (datetime.now(UTC) - stamp).total_seconds()
             if not 0 <= age <= 86400 or not data.get("source"):
@@ -226,7 +252,7 @@ class RobinhoodMcpMarketData(MarketDataProvider):
         row = self._reference().get("symbols", {}).get(symbol, {})
         if row.get("earnings_checked") is not True or "earnings" not in row:
             return False
-        return row["earnings"] is None or as_date(row["earnings"]) is not None
+        return row["earnings"] is None or (as_date(row["earnings"]) or date.min) >= self._today()
 
     def next_earnings_date(self, symbol: str) -> date | None:
         return as_date(self._reference().get("symbols", {}).get(symbol, {}).get("earnings"))

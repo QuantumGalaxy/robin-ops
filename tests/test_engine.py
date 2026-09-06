@@ -89,6 +89,9 @@ def test_expired_position_is_settled_not_leaked(tmp_path):
     _, market, broker, engine = build(tmp_path)
     contract = OptionContract("AAPL", market.today - timedelta(days=1), 150.0, "call")
     engine.portfolio.add(Position(contract=contract, quantity=1, entry_price=4.0))
+    broker._positions[contract.occ_symbol] = Position(
+        contract=contract, quantity=1, entry_price=4.0
+    )
 
     engine.run_once(as_of=now_for(market))
 

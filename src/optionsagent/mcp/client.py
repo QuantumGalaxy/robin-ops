@@ -55,13 +55,14 @@ class HttpToolCaller:
     """JSON-RPC over MCP streamable HTTP."""
 
     url: str = ROBINHOOD_MCP_URL
-    token: str | None = None
+    token: str | None = field(default=None, repr=False)
     timeout: float = 30.0
     client_name: str = "optionsagent"
     client_version: str = "0.1.0"
     _session_id: str | None = field(default=None, init=False)
     _next_id: int = field(default=0, init=False)
     _initialized: bool = field(default=False, init=False)
+    _protocol_version: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.token = self.token or os.environ.get("ROBINHOOD_MCP_TOKEN")
@@ -81,6 +82,8 @@ class HttpToolCaller:
             "Accept": "application/json, text/event-stream",
             "Authorization": f"Bearer {self.token}",
         }
+        if self._protocol_version:
+            headers["MCP-Protocol-Version"] = self._protocol_version
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
 
@@ -90,23 +93,30 @@ class HttpToolCaller:
                 session = resp.headers.get("Mcp-Session-Id")
                 if session:
                     self._session_id = session
-                raw = resp.read().decode()
                 content_type = resp.headers.get("Content-Type", "")
+                if "text/event-stream" in content_type:
+                    message = _read_sse(resp, payload.get("id"))
+                else:
+                    raw = resp.read().decode()
+                    message = json.loads(raw) if raw.strip() else None
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 raise McpAuthError(
                     f"Robinhood MCP rejected the token ({exc.code}). Re-authorise and "
                     "set a fresh ROBINHOOD_MCP_TOKEN."
                 ) from exc
-            raise McpError(f"MCP request failed ({exc.code}): {exc.read().decode()[:400]}") from exc
+            if exc.code == 404:
+                self._initialized = False
+                self._session_id = None
+                self._protocol_version = None
+            raise McpError(f"MCP request failed ({exc.code})") from exc
         except urllib.error.URLError as exc:
             raise McpError(f"could not reach {self.url}: {exc.reason}") from exc
 
-        if not raw.strip():
+        if "id" not in payload:
             return None
-        message = _parse_sse(raw) if "text/event-stream" in content_type else json.loads(raw)
-        if message is None:
-            return None
+        if not isinstance(message, dict) or message.get("id") != payload["id"]:
+            raise McpError("MCP response missing or request ID does not match")
         if "error" in message:
             err = message["error"]
             raise McpError(f"{err.get('code')}: {err.get('message')}")
@@ -132,6 +142,9 @@ class HttpToolCaller:
                 "clientInfo": {"name": self.client_name, "version": self.client_version},
             },
         )
+        if not isinstance(result, dict) or result.get("protocolVersion") != "2025-06-18":
+            raise McpError("Unsupported MCP protocol version")
+        self._protocol_version = result["protocolVersion"]
         self._notify("notifications/initialized")
         self._initialized = True
         return result or {}
@@ -142,17 +155,59 @@ class HttpToolCaller:
 
     def list_tools(self) -> list[dict[str, Any]]:
         self._ensure_initialized()
-        result = self._request("tools/list") or {}
-        return list(result.get("tools", []))
+        found, cursor, seen = [], None, set()
+        while True:
+            result = self._request("tools/list", {"cursor": cursor} if cursor else {}) or {}
+            found.extend(result.get("tools", []))
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return found
+            if cursor in seen or len(seen) >= 100:
+                raise McpError("Invalid MCP tool pagination")
+            seen.add(cursor)
 
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
-        if name.startswith(("place_", "cancel_")):
+        if name not in {
+            "get_equity_quotes",
+            "get_option_chains",
+            "get_option_instruments",
+            "get_option_quotes",
+            "get_option_positions",
+            "get_option_orders",
+            "get_option_order",
+            "get_portfolio",
+            "get_accounts",
+            "get_account",
+            "get_equity_historicals",
+            "review_option_order",
+        }:
             raise McpError("Live mutation tools are disabled in this simulation release")
         self._ensure_initialized()
         result = self._request("tools/call", {"name": name, "arguments": arguments}) or {}
         if result.get("isError"):
-            raise McpError(f"tool {name} failed: {_content_text(result)[:400]}")
+            raise McpError(f"tool {name} failed")
         return _unwrap_content(result)
+
+
+def _read_sse(stream, request_id: int | None) -> dict[str, Any] | None:
+    """Stop at our response; an SSE connection need not close after sending it."""
+    if request_id is None:
+        return None
+    parts: list[str] = []
+    size = 0
+    for raw in stream:
+        size += len(raw)
+        if size > 8 * 1024 * 1024:
+            raise McpError("MCP event stream exceeded response limit")
+        line = raw.decode().rstrip("\r\n")
+        if line.startswith("data:"):
+            parts.append(line[5:].lstrip(" "))
+        elif not line and parts:
+            message = json.loads("\n".join(parts))
+            parts.clear()
+            if isinstance(message, dict) and message.get("id") == request_id:
+                return message
+    raise McpError("MCP stream ended without the requested response")
 
 
 def _parse_sse(raw: str) -> dict[str, Any] | None:

@@ -108,30 +108,7 @@ class RobinhoodBroker(Broker):
         if self.dry_run:
             log.info("DRY RUN order (not submitted): %s", payload)
             return None
-        log.info("submitting order: %s", payload)
-        if side is Side.BUY:
-            return self._rh.orders.order_buy_option_limit(
-                positionEffect="open",
-                creditOrDebit="debit",
-                price=round(price, 2),
-                symbol=contract.symbol,
-                quantity=quantity,
-                expirationDate=contract.expiry.strftime("%Y-%m-%d"),
-                strike=contract.strike,
-                optionType=contract.right,
-                timeInForce=self.time_in_force,
-            )
-        return self._rh.orders.order_sell_option_limit(
-            positionEffect="close",
-            creditOrDebit="credit",
-            price=round(price, 2),
-            symbol=contract.symbol,
-            quantity=quantity,
-            expirationDate=contract.expiry.strftime("%Y-%m-%d"),
-            strike=contract.strike,
-            optionType=contract.right,
-            timeInForce=self.time_in_force,
-        )
+        raise RuntimeError("Legacy live execution is disabled; use simulation mode")
 
     def buy_to_open(self, quote: OptionQuote, quantity: int, limit_price: float) -> Fill | None:
         result = self._submit(Side.BUY, quote.contract, quantity, limit_price)
@@ -162,4 +139,4 @@ class RobinhoodBroker(Broker):
         if self.dry_run:
             log.info("DRY RUN: would cancel all open option orders")
             return
-        self._rh.orders.cancel_all_option_orders()
+        raise RuntimeError("Legacy live execution is disabled")

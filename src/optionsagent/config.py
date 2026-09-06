@@ -8,12 +8,15 @@ so the two can be simulated side by side.
 
 from __future__ import annotations
 
+import math
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Large-cap, deeply liquid names with weekly expirations and penny-wide or
@@ -43,9 +46,13 @@ DEFAULT_UNIVERSE: list[str] = [
 ]
 
 
-class UniverseConfig(BaseModel):
+class StrictConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, validate_assignment=True)
+
+
+class UniverseConfig(StrictConfig):
     symbols: list[str] = Field(default_factory=lambda: list(DEFAULT_UNIVERSE))
-    max_symbols: int = 20
+    max_symbols: int = Field(default=20, ge=1, le=20)
 
     @model_validator(mode="after")
     def _dedupe(self) -> UniverseConfig:
@@ -54,11 +61,15 @@ class UniverseConfig(BaseModel):
             u = s.upper().strip()
             if u and u not in seen:
                 seen.append(u)
-        object.__setattr__(self, "symbols", seen[: self.max_symbols])
+        if not seen or len(seen) > self.max_symbols:
+            raise ValueError("Choose between one and max_symbols unique symbols")
+        if any(not re.fullmatch(r"[A-Z][A-Z0-9.]{0,5}", symbol) for symbol in seen):
+            raise ValueError("Invalid universe symbol")
+        object.__setattr__(self, "symbols", seen)
         return self
 
 
-class EntryConfig(BaseModel):
+class EntryConfig(StrictConfig):
     """Filters applied to every contract before it can be bought."""
 
     min_dte: int = 12
@@ -96,7 +107,7 @@ class EntryConfig(BaseModel):
     allowed_rights: list[Literal["call", "put"]] = Field(default_factory=lambda: ["call", "put"])
 
 
-class ExitConfig(BaseModel):
+class ExitConfig(StrictConfig):
     """The exit rule set. This is where the brief's requirements are encoded."""
 
     take_profit_pct: float = 0.10
@@ -152,7 +163,7 @@ class ExitConfig(BaseModel):
     earnings_exit_days: int = 1
 
 
-class SizingConfig(BaseModel):
+class SizingConfig(StrictConfig):
     max_trade_premium: float = Field(default=1000.0, gt=0)
     risk_per_trade_pct: float = 0.02
     """Fraction of equity put at risk per trade. Because the stop is -50%, the
@@ -168,7 +179,7 @@ class SizingConfig(BaseModel):
     cash_reserve_pct: float = 0.20
 
 
-class RiskConfig(BaseModel):
+class RiskConfig(StrictConfig):
     daily_loss_limit_pct: float = 0.05
     """Halt new entries for the rest of the session after a 5% equity drawdown."""
 
@@ -184,7 +195,7 @@ class RiskConfig(BaseModel):
     kill_switch_file: str = "state/KILL"
 
 
-class ExecutionConfig(BaseModel):
+class ExecutionConfig(StrictConfig):
     order_type: Literal["limit"] = "limit"
     """Market orders on options are how accounts get filled at the ask on a wide
     spread. The agent only ever sends limit orders."""
@@ -215,12 +226,12 @@ class ExecutionConfig(BaseModel):
     timezone: str = "America/New_York"
 
 
-class MarketConfig(BaseModel):
+class MarketConfig(StrictConfig):
     risk_free_rate: float = 0.042
     dividend_yield: float = 0.0
 
 
-class BrokerConfig(BaseModel):
+class BrokerConfig(StrictConfig):
     kind: Literal["paper", "robinhood_mcp", "robinhood"] = "paper"
     """``robinhood_mcp`` is the official Trading MCP and the one to use. ``robinhood``
     is the unofficial ``robin_stocks`` path, kept only for reference."""
@@ -250,7 +261,9 @@ class Mode(StrEnum):
 
 
 class Config(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OPTIONSAGENT_", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(
+        env_prefix="OPTIONSAGENT_", env_nested_delimiter="__", extra="forbid", allow_inf_nan=False
+    )
 
     data_provider: Literal["synthetic", "robinhood_mcp"] = "synthetic"
     reference_data_file: str | None = None
@@ -267,6 +280,81 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def validate_safety(self) -> Config:
+        for group in (
+            self.entry,
+            self.exit,
+            self.sizing,
+            self.risk,
+            self.execution,
+            self.market,
+            self.broker,
+        ):
+            for name, value in group.model_dump().items():
+                if isinstance(value, float) and not math.isfinite(value):
+                    raise ValueError(f"{name} must be finite")
+        for value in (
+            self.sizing.risk_per_trade_pct,
+            self.sizing.max_portfolio_premium_pct,
+            self.risk.daily_loss_limit_pct,
+            self.risk.max_drawdown_halt_pct,
+        ):
+            if not 0 < value <= 1:
+                raise ValueError("Risk and exposure fractions must be in (0, 1]")
+        if not 0 <= self.sizing.cash_reserve_pct < 1:
+            raise ValueError("cash_reserve_pct must be in [0, 1)")
+        if not 1 <= self.sizing.min_contracts <= self.sizing.max_contracts:
+            raise ValueError("Invalid contract quantity bounds")
+        if not 1 <= self.sizing.max_positions_per_symbol <= self.sizing.max_positions:
+            raise ValueError("Invalid position limits")
+        if (
+            min(
+                self.execution.poll_interval_seconds,
+                self.execution.reprice_attempts,
+                self.exit.max_hold_days,
+                self.risk.max_consecutive_losses,
+            )
+            <= 0
+        ):
+            raise ValueError("Polling, retry, holding and loss-count limits must be positive")
+        if self.entry.min_dte < 1 or self.exit.expiry_guard_dte < 0:
+            raise ValueError("Invalid DTE bounds")
+        if not 0 < self.entry.min_premium <= self.entry.max_premium:
+            raise ValueError("Invalid premium bounds")
+        if (
+            min(
+                self.entry.min_open_interest,
+                self.entry.min_volume,
+                self.entry.avoid_earnings_within_days,
+                self.exit.earnings_exit_days,
+            )
+            < 0
+        ):
+            raise ValueError("Liquidity and event windows cannot be negative")
+        if not -1 <= self.exit.expiry_guard_loss_pct < 0 or self.exit.take_profit_pct <= 0:
+            raise ValueError("Invalid exit thresholds")
+        if not 0 <= self.exit.trailing_floor_pct <= self.exit.take_profit_pct:
+            raise ValueError("Trailing floor cannot exceed activation threshold")
+        for value in (
+            self.execution.entry_limit_offset,
+            self.execution.exit_limit_offset,
+            self.execution.max_slippage_pct,
+            self.entry.max_iv_rank,
+        ):
+            if not 0 <= value <= 1:
+                raise ValueError("Execution and IV fractions must be in [0, 1]")
+        if self.broker.starting_equity <= 0:
+            raise ValueError("Starting equity must be positive")
+        ZoneInfo(self.execution.timezone)
+        times = (
+            self.execution.market_open,
+            self.execution.entry_window_start,
+            self.execution.entry_window_end,
+            self.execution.market_close,
+        )
+        if any(not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", t) for t in times):
+            raise ValueError("Session times must use HH:MM")
+        if not times[0] <= times[1] < times[2] <= times[3]:
+            raise ValueError("Entry window must be within market hours")
         if self.state_dir != "state" and self.risk.kill_switch_file == "state/KILL":
             self.risk.kill_switch_file = str(Path(self.state_dir) / "KILL")
         if self.entry.min_dte > self.entry.max_dte:

@@ -78,6 +78,7 @@ def build_market_data() -> tuple[RobinhoodMcpMarketData, FakeToolCaller]:
         tools=[
             {"name": n}
             for n in (
+                "get_equity_quotes",
                 "get_option_chains",
                 "get_option_instruments",
                 "get_option_quotes",
@@ -87,7 +88,15 @@ def build_market_data() -> tuple[RobinhoodMcpMarketData, FakeToolCaller]:
             )
         ],
         responses={
-            "get_equity_quotes": {"results": [{"symbol": "AAPL", "last_trade_price": "200.00"}]},
+            "get_equity_quotes": {
+                "results": [
+                    {
+                        "symbol": "AAPL",
+                        "last_trade_price": "200.00",
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    }
+                ]
+            },
             "get_option_chains": {"expiration_dates": [EXPIRY.strftime("%Y-%m-%d")]},
             "get_option_instruments": lambda args: {
                 "results": (

@@ -35,14 +35,9 @@ class MarketDataProvider(ABC):
         """
         return []
 
-    def iv_rank(self, symbol: str) -> float:
-        """Where current IV sits in its trailing 52-week range, 0.0 to 1.0.
-
-        Defaults to 0.5 (neutral) when a provider cannot supply history, which
-        makes the IV-rank filter a no-op rather than silently rejecting
-        everything.
-        """
-        return 0.5
+    def iv_rank(self, symbol: str) -> float | None:
+        """Trailing daily ATM IV rank; unavailable history must block entries."""
+        return None
 
     def next_earnings_date(self, symbol: str) -> date | None:
         """Next confirmed or estimated earnings date, if known."""

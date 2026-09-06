@@ -8,6 +8,7 @@ stop-out on all of them costs about 12%. Survivable, which is the whole point.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from ..config import SizingConfig
@@ -30,7 +31,19 @@ def size_position(
     open_premium: float,
     cfg: SizingConfig,
     stop_loss_pct: float = -0.50,
+    fee_per_contract: float = 0.06,
 ) -> SizingDecision:
+    if (
+        not quote.is_tradeable()
+        or not all(
+            math.isfinite(v)
+            for v in (equity, buying_power, open_premium, stop_loss_pct, fee_per_contract)
+        )
+        or open_premium < 0
+        or not -1 <= stop_loss_pct < 0
+        or fee_per_contract < 0
+    ):
+        return SizingDecision(0, 0, 0, "invalid sizing inputs")
     price_per_contract = quote.ask * CONTRACT_MULTIPLIER
     if price_per_contract <= 0 or equity <= 0:
         return SizingDecision(0, 0.0, 0.0, "no price or no equity")
@@ -49,7 +62,7 @@ def size_position(
         return SizingDecision(0, 0.0, 0.0, "cash reserve floor reached")
 
     allowed = min(target_premium, premium_cap, cash_cap, cfg.max_trade_premium)
-    contracts = int(allowed // price_per_contract)
+    contracts = int(allowed // (price_per_contract + fee_per_contract))
     contracts = min(contracts, cfg.max_contracts)
 
     if contracts < cfg.min_contracts:

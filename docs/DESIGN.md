@@ -1,3 +1,5 @@
+> Historical design/experiment notes. See [current implementation review](SECOND-REVIEW.md) and `config/recommended.yaml` for current behavior. Older sweep numbers predate execution and simulation fixes and do not establish profitability.
+
 # Design: a Robinhood options trading agent
 
 This document does three things: it states the rules you asked for, it works through
