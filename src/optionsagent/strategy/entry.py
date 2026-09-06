@@ -98,7 +98,7 @@ class EntryScreener:
         quotes: list[OptionQuote],
         direction: Direction,
         *,
-        iv_rank: float = 0.5,
+        iv_rank: float | None = None,
         days_to_earnings: int | None = None,
         confidence: float = 0.5,
         as_of: date | None = None,
@@ -110,7 +110,7 @@ class EntryScreener:
             and 0 <= days_to_earnings <= self.cfg.avoid_earnings_within_days
         ):
             return []
-        if iv_rank > self.cfg.max_iv_rank:
+        if iv_rank is None or not math.isfinite(iv_rank) or iv_rank > self.cfg.max_iv_rank:
             return []
 
         out: list[Candidate] = []
@@ -133,6 +133,11 @@ class EntryScreener:
         if c.right != direction or not q.is_tradeable() or q.greeks is None:
             return None
 
+        if self.cfg.require_itm:
+            if c.right == "call" and c.strike >= q.underlying_price:
+                return None
+            if c.right == "put" and c.strike <= q.underlying_price:
+                return None
         dte = c.days_to_expiry(as_of)
         if not (self.cfg.min_dte <= dte <= self.cfg.max_dte):
             return None

@@ -1,6 +1,6 @@
 """Tests for the Robinhood MCP adapters and duplicate-order protection."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -32,7 +32,14 @@ def test_pick_falls_through_alternative_field_names():
     assert pick(row, "strike", "strike_price") == "150.0"
     assert pick(row, "missing", default="fallback") == "fallback"
     # A present-but-null field must not shadow a later one that has a value.
-    assert pick({"bid": None, "bid_price": 1.2}, "bid", "bid_price") == 1.2
+    assert (
+        pick(
+            {"bid": None, "updated_at": datetime.now(UTC).isoformat(), "bid_price": 1.2},
+            "bid",
+            "bid_price",
+        )
+        == 1.2
+    )
 
 
 # ---- pre-trade review ----------------------------------------------------
@@ -93,6 +100,7 @@ def build_market_data() -> tuple[RobinhoodMcpMarketData, FakeToolCaller]:
                 "results": [
                     {
                         "instrument_id": i,
+                        "updated_at": datetime.now(UTC).isoformat(),
                         "bid_price": "12.00",
                         "ask_price": "12.20",
                         "open_interest": "4200",
@@ -151,13 +159,18 @@ def build_broker(dry_run: bool = False, **kwargs) -> tuple[RobinhoodMcpBroker, F
                         "option_type": "call",
                         "quantity": "2",
                         "type": "long",
-                        "average_price": "1150.00",
+                        "average_price": "11.50",
                         "option_id": "inst-call",
                     }
                 ]
             },
             "review_option_order": {"alerts": [], "estimated_cost": 1220.0},
-            "place_option_order": {"id": "order-1", "state": "filled", "average_price": "12.15"},
+            "place_option_order": {
+                "id": "order-1",
+                "state": "filled",
+                "average_price": "12.15",
+                "filled_quantity": 1,
+            },
         },
     )
     return RobinhoodMcpBroker(caller=caller, dry_run=dry_run, **kwargs), caller
@@ -174,11 +187,11 @@ def test_equity_and_buying_power():
     assert broker.buying_power() == pytest.approx(12_000)
 
 
-def test_per_contract_average_price_is_normalised_to_per_share():
+def test_explicit_per_share_average_price_is_preserved():
     broker, _ = build_broker()
     positions = broker.positions()
     assert len(positions) == 1
-    # 1150.00 is quoted per contract; a $195 strike makes per-share unambiguous.
+    # The adapter fixture explicitly declares per-share prices.
     assert positions[0].entry_price == pytest.approx(11.50)
     assert positions[0].quantity == 2
 
@@ -289,12 +302,13 @@ def test_the_registry_survives_a_restart(tmp_path):
     assert OrderRegistry(state_dir=tmp_path).is_duplicate(oid)
 
 
-def test_a_stale_pending_order_stops_blocking(tmp_path):
+def test_a_stale_pending_order_keeps_blocking(tmp_path):
     reg = OrderRegistry(state_dir=tmp_path, pending_ttl_minutes=0)
     oid = client_order_id(contract(), Side.BUY, 1)
     reg.reserve(oid, contract(), Side.BUY, 1, 12.15)
-    # Otherwise a lost response would wedge the agent out of the contract forever.
-    assert not reg.is_duplicate(oid)
+    # Age cannot prove an uncertain order was canceled.
+    assert reg.is_duplicate(oid)
+    assert reg.has_pending_for(contract().occ_symbol)
 
 
 def test_pending_order_blocks_a_second_position_in_the_same_contract(tmp_path):
@@ -304,9 +318,10 @@ def test_pending_order_blocks_a_second_position_in_the_same_contract(tmp_path):
     assert not reg.has_pending_for("NOTHING")
 
 
-def test_corrupt_registry_does_not_crash_the_agent(tmp_path):
+def test_corrupt_registry_blocks_startup(tmp_path):
     (tmp_path / "orders.json").write_text("{ this is not json")
-    assert OrderRegistry(state_dir=tmp_path).orders == {}
+    with pytest.raises(RuntimeError, match="corrupt"):
+        OrderRegistry(state_dir=tmp_path)
 
 
 def test_position_reconstruction_skips_unparseable_rows():
@@ -434,5 +449,5 @@ def test_reconcile_mismatch_halts_new_entries(tmp_path):
         portfolio=portfolio,
     )
     report = engine.run_once()
-    assert "disagreed with the broker" in report.blocked_reason
+    assert "ledger-only" in report.blocked_reason
     assert report.opened == []

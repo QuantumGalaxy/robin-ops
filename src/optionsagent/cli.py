@@ -14,15 +14,15 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .brokers import build_broker
-from .config import Config
+from .config import Config, Mode
 from .engine import TradingEngine
 from .greeks import compute_greeks, years_to_expiry
 from .marketdata import build_provider
 from .portfolio import Portfolio
+from .runtime import RuntimeStore, single_writer
 from .simulate import breakeven_win_rate, kelly_fraction, run_simulation
 from .strategy.entry import EntryScreener, move_in_sigmas, required_underlying_move
 from .strategy.exits import trailing_stop_level
-from .strategy.signals import MomentumSignal, PriceHistory
 
 app = typer.Typer(
     add_completion=False,
@@ -67,7 +67,7 @@ def explain() -> None:
         "How much the option moves per $1 move in the stock. 0.60 delta means the "
         "option gains about 60 cents when the stock gains a dollar. It also "
         "approximates the chance of finishing in the money.",
-        "Buys 0.45-0.70 delta. High delta means a small stock move produces the "
+        "Buys 0.55-0.70 delta. High delta means a small stock move produces the "
         "+10% gain; cheap 0.15-delta contracts need a huge move and usually "
         "expire worthless.",
     )
@@ -83,8 +83,8 @@ def explain() -> None:
         "Dollars the contract loses per day just from time passing. It "
         "accelerates as expiry approaches.",
         "Rejects contracts bleeding more than 2.5%/day, and exits early if decay "
-        "outruns the thesis. This is why the agent buys 30-45 days out instead "
-        "of 14.",
+        "outruns the thesis. The default profile buys 12-18 DTE; longer expirations "
+        "remain a separate experiment.",
     )
     t.add_row(
         "Vega",
@@ -354,62 +354,57 @@ def run(
     _setup_logging(verbose)
     cfg = _load(config)
 
-    if live:
-        if cfg.broker.kind == "paper":
-            console.print("[red]--live requires broker.kind = robinhood in the config.[/red]")
-            raise typer.Exit(1)
-        console.print(
-            Panel(
-                "[bold red]LIVE TRADING[/bold red]\n\n"
-                "Real orders will be submitted to a real account. Options can lose "
-                "100% of the premium paid, and this agent has no ability to detect a "
-                "halted stock, a corporate action, or a broken quote feed.\n\n"
-                "Run it in paper mode for a full options cycle first.",
-                border_style="red",
-            )
+    if live or cfg.mode in (Mode.LIVE_APPROVAL, Mode.LIVE_AUTO):
+        raise typer.BadParameter(
+            "Live execution is disabled until account schemas and order recovery are verified."
         )
-        if cfg.broker.require_confirmation and not typer.confirm("Proceed with live trading?"):
-            raise typer.Exit(1)
-        cfg.broker.dry_run = False
-
-    provider_kind = "paper" if cfg.broker.kind == "paper" else "robinhood"
-    data = build_provider(provider_kind, risk_free_rate=cfg.market.risk_free_rate)
-    if cfg.broker.kind == "paper":
-        # Give the paper broker the synthetic market's clock. Without it,
-        # day-trade accounting runs on wall-clock time while positions are
-        # opened in simulated time, and every close looks like a day trade.
-        broker_kwargs = {
-            "starting_equity": cfg.broker.starting_equity,
-            "clock": lambda: _sim_now(data) or datetime.now(UTC),
-        }
-    else:
-        broker_kwargs = {"dry_run": cfg.broker.dry_run}
-    broker = build_broker(cfg.broker.kind, **broker_kwargs)
-    portfolio = Portfolio.load(cfg.state_dir)
-
-    engine = TradingEngine(
-        config=cfg,
-        data=data,
-        broker=broker,
-        portfolio=portfolio,
-        signal=MomentumSignal(),
-        history=PriceHistory(),
-    )
-    engine.warmup()
-
-    if loops < 0:
-        engine.run_forever()
+    if cfg.mode is Mode.OFF:
+        console.print("Agent is off; no account or market-data calls made.")
         return
-    for i in range(loops):
-        if advance_days and hasattr(data, "step"):
-            data.step(advance_days)  # type: ignore[attr-defined]
-        report = engine.run_once(as_of=_sim_now(data))
-        console.print(f"[cyan]loop {i + 1}[/cyan]: {report.describe()}")
-        for line in report.opened:
-            console.print(f"  [green]opened[/green] {line}")
-        for line in report.closed:
-            console.print(f"  [magenta]closed[/magenta] {line}")
-    _print_status(portfolio)
+    if cfg.broker.kind != "paper":
+        raise typer.BadParameter(
+            "This release requires broker.kind: paper; choose data_provider separately"
+        )
+    with single_writer(cfg.state_dir):
+        data = build_provider(cfg.data_provider, risk_free_rate=cfg.market.risk_free_rate)
+        if cfg.reference_data_file and cfg.data_provider == "robinhood_mcp":
+            data.reference_data_file = cfg.reference_data_file
+        broker = build_broker(
+            "paper",
+            starting_equity=cfg.broker.starting_equity,
+            clock=lambda: _sim_now(data) or datetime.now(UTC),
+        )
+        store = RuntimeStore(cfg.state_dir)
+        # The database checkpoint is authoritative. JSON files are legacy exports.
+        portfolio = Portfolio(cfg.state_dir) if store.read() else Portfolio.load(cfg.state_dir)
+        engine = TradingEngine(cfg, data, broker, portfolio, store=store)
+        if not store.restore(engine):
+            engine.warmup()
+            engine._checkpoint()
+        import time as wall_time
+
+        count = 0
+        try:
+            while loops < 0 or count < loops:
+                if hasattr(data, "step"):
+                    data.step(advance_days or 1)
+                try:
+                    report = engine.run_once(as_of=_sim_now(data))
+                    console.print(f"[cyan]loop {count + 1}[/cyan]: {report.describe()}")
+                except Exception as exc:
+                    # Persist uncertainty; no blind retry after a partially completed loop.
+                    engine.reconcile_halt = (
+                        "loop failed; inspect audit and reconcile before entries"
+                    )
+                    store.event("error", {"type": type(exc).__name__, "message": str(exc)})
+                    engine._checkpoint()
+                    raise
+                count += 1
+                if loops < 0:
+                    wall_time.sleep(cfg.execution.poll_interval_seconds)
+        except KeyboardInterrupt:
+            engine._checkpoint()
+        _print_status(portfolio)
 
 
 def _sim_now(data) -> datetime | None:
@@ -424,7 +419,33 @@ def _sim_now(data) -> datetime | None:
 def status(config: ConfigOpt = None) -> None:
     """Show open positions and closed-trade statistics from saved state."""
     cfg = _load(config)
-    _print_status(Portfolio.load(cfg.state_dir))
+    store = RuntimeStore(cfg.state_dir)
+    snapshot = store.read()
+    if snapshot:
+        from .models import ExitReason, TradeRecord
+        from .runtime import position
+
+        pf = Portfolio(cfg.state_dir)
+        pf.positions = {p.contract.occ_symbol: p for p in map(position, snapshot["positions"])}
+        pf.realized_pnl = snapshot["realized_pnl"]
+        for raw in snapshot["trades"]:
+            row = dict(raw)
+            row["opened_at"] = datetime.fromisoformat(row["opened_at"])
+            row["closed_at"] = datetime.fromisoformat(row["closed_at"])
+            row["reason"] = ExitReason(row["reason"])
+            pf.trades.append(TradeRecord(**row))
+        console.print(
+            Panel(
+                f"Mode: {snapshot['config']['mode']} | "
+                f"Data: {snapshot['config']['data_provider']}\n"
+                f"Simulated cash: ${snapshot.get('paper', {}).get('cash', 0):,.2f}\n"
+                f"Entry halt: {snapshot.get('reconcile_halt') or 'none'}",
+                title="Options Agent",
+            )
+        )
+        _print_status(pf)
+    else:
+        _print_status(Portfolio.load(cfg.state_dir))
 
 
 def _print_status(portfolio: Portfolio) -> None:
@@ -472,6 +493,67 @@ def _print_status(portfolio: Portfolio) -> None:
         console.print(f"[dim]exits: {summary['exit_reasons']}[/dim]")
     else:
         console.print("[dim]No closed trades yet.[/dim]")
+
+
+@app.command()
+def dashboard(config: ConfigOpt = None) -> None:
+    """Read-only terminal dashboard; refreshes persisted state every two seconds."""
+    import sqlite3
+    import time as wall_time
+
+    from rich.console import Group
+    from rich.live import Live
+
+    cfg = _load(config)
+    path = Path(cfg.state_dir) / "runtime.sqlite3"
+    if not path.exists():
+        raise typer.BadParameter("Run a simulation first to create the dashboard state")
+
+    def render():
+        with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as db:
+            row = db.execute("SELECT body FROM checkpoint WHERE id=1").fetchone()
+            events = db.execute(
+                "SELECT at, kind, body FROM audit ORDER BY id DESC LIMIT 5"
+            ).fetchall()
+        data = json.loads(row[0]) if row else {}
+        table = Table(title="Positions (simulated)")
+        for col in ("Symbol", "Right", "Strike", "Expiry", "Qty", "Entry", "Mark", "Trail"):
+            table.add_column(col)
+        for p in data.get("positions", []):
+            c = p["contract"]
+            table.add_row(
+                c["symbol"],
+                c["right"],
+                str(c["strike"]),
+                c["expiry"],
+                str(p["quantity"]),
+                str(p["entry_price"]),
+                str(p["last_mark"]),
+                "armed" if p["trailing_armed"] else "off",
+            )
+        current = data.get("config", {})
+        status = f"Mode: {current.get('mode')} | Data: {current.get('data_provider')}\n"
+        status += f"Cash: {data.get('paper', {}).get('cash', 0):.2f} | "
+        status += f"Realized P/L: {data.get('realized_pnl', 0):.2f}\n"
+        status += "Halt: " + str(
+            data.get("reconcile_halt") or data.get("risk", {}).get("halted_reason") or "none"
+        )
+        pending = [o for o in data.get("orders", {}).values() if o["state"] == "pending"]
+        status += f" | Pending orders: {len(pending)}"
+        activity = "\n".join(f"{at} {kind}: {body}" for at, kind, body in events)
+        return Group(
+            Panel(status, title="Options Agent — Simulation"),
+            table,
+            Panel(activity, title="Recent decisions and health"),
+        )
+
+    try:
+        with Live(render(), console=console, refresh_per_second=1) as live_view:
+            while True:
+                wall_time.sleep(2)
+                live_view.update(render())
+    except KeyboardInterrupt:
+        pass
 
 
 @app.command("init-config")

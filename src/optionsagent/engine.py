@@ -20,8 +20,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .brokers.base import Broker
+from .brokers.paper import PaperBroker
 from .config import Config, Mode
 from .greeks import intrinsic
 from .marketdata.base import MarketDataProvider
@@ -29,6 +31,7 @@ from .models import ExitReason, OptionQuote, Position, Side, utcnow
 from .orders import OrderRegistry, OrderState, client_order_id
 from .portfolio import Portfolio
 from .risk import RiskManager
+from .runtime import RuntimeStore
 from .strategy.entry import EntryScreener
 from .strategy.exits import evaluate_exit
 from .strategy.signals import MomentumSignal, PriceHistory
@@ -74,6 +77,8 @@ class TradingEngine:
     risk: RiskManager | None = None
     screener: EntryScreener | None = None
     orders: OrderRegistry | None = None
+    store: RuntimeStore | None = None
+    reconcile_halt: str = ""
     max_candidates_considered: int = 12
     """How far down the ranked list to look for a contract that fits the budget."""
 
@@ -87,6 +92,12 @@ class TradingEngine:
     """
 
     def __post_init__(self) -> None:
+        if self.config.mode in (Mode.LIVE_APPROVAL, Mode.LIVE_AUTO):
+            raise RuntimeError(
+                "Live trading disabled pending verified broker lifecycle integration"
+            )
+        if self.config.mode is Mode.PAPER and not isinstance(self.broker, PaperBroker):
+            raise RuntimeError("PAPER mode requires PaperBroker")
         if self.risk is None:
             self.risk = RiskManager(self.config.risk)
         if self.orders is None:
@@ -110,30 +121,64 @@ class TradingEngine:
 
     def run_once(self, as_of: datetime | None = None) -> LoopReport:
         now = as_of or utcnow()
+        if self.config.mode in (Mode.LIVE_APPROVAL, Mode.LIVE_AUTO):
+            raise RuntimeError(
+                "Live trading disabled pending verified broker lifecycle integration"
+            )
+        if self.config.mode is Mode.PAPER and not isinstance(self.broker, PaperBroker):
+            raise RuntimeError("PAPER mode requires PaperBroker")
+        if self.config.mode is Mode.OFF:
+            return LoopReport(at=now, equity=0.0, blocked_reason="off")
         equity = self.broker.equity()
         assert self.risk is not None
-        self.risk.start_session(now.date(), equity)
-
+        self.risk.start_session(
+            now.astimezone(ZoneInfo(self.config.execution.timezone)).date(), equity
+        )
         report = LoopReport(at=now, equity=equity)
-        self._refresh_history()
-        self._settle_expirations(now, report)
-        self._reconcile(report)
-        self._manage_exits(now, report)
-
-        allowed, reason = self.risk.can_open(equity, self.broker.day_trades_used())
         if self.config.mode is Mode.SCAN_ONLY:
+            self._refresh_history(now)
             self._scan_entries(now, report, dry=True)
-            report.blocked_reason = "scan-only mode: candidates logged, nothing opened"
-        elif report.reconcile_mismatch:
-            report.blocked_reason = report.reconcile_mismatch
+            report.blocked_reason = "scan-only: no order or position mutations"
+            self._checkpoint(report)
+            return report
+
+        # Broker truth and held-position exits do not depend on scanning the universe.
+        self._reconcile(report)
+        self._settle_expirations(now, report)
+        self._manage_exits(now, report)
+        self._refresh_history(now)
+        equity = self.broker.equity()
+        allowed, reason = self.risk.can_open(equity, self.broker.day_trades_used())
+        if self.reconcile_halt:
+            report.blocked_reason = self.reconcile_halt
+        elif self.orders.pending():
+            report.blocked_reason = "unresolved order: reconciliation required"
         elif allowed:
             self._scan_entries(now, report)
         else:
             report.blocked_reason = reason
-
         report.held = [str(p.contract) for p in self.portfolio.positions.values()]
         report.equity = self.broker.equity()
+        self._checkpoint(report)
         return report
+
+    def _checkpoint(self, report=None):
+        if self.store:
+            self.store.save(self)
+            if report:
+                from dataclasses import asdict
+
+                self.store.event("loop", asdict(report))
+
+    def _usable(self, quote, now):
+        return (
+            quote is not None
+            and quote.is_tradeable()
+            and (
+                self.config.data_provider == "synthetic"
+                or quote.is_fresh(now, self.config.execution.max_quote_age_seconds)
+            )
+        )
 
     def run_forever(self, max_loops: int | None = None) -> None:
         loops = 0
@@ -153,11 +198,20 @@ class TradingEngine:
 
     # ---- steps -----------------------------------------------------------
 
-    def _refresh_history(self) -> None:
+    def _refresh_history(self, now: datetime) -> None:
         for symbol in self.config.universe.symbols:
-            price = self.data.underlying_price(symbol)
-            if price:
-                self.history.push(symbol, price)
+            try:
+                # Daily strategy: refresh completed daily bars, never append minute polls.
+                if self.config.data_provider != "synthetic":
+                    closes = self.data.historical_closes(symbol, 90)
+                    if closes:
+                        self.history.replace(symbol, closes)
+                else:
+                    price = self.data.underlying_price(symbol)
+                    if price:
+                        self.history.push_daily(symbol, price, now.date())
+            except Exception:
+                log.exception("history refresh failed for %s", symbol)
 
     def _quote_for(self, position: Position) -> OptionQuote | None:
         c = position.contract
@@ -174,13 +228,22 @@ class TradingEngine:
         for key, position in list(self.portfolio.positions.items()):
             if position.contract.days_to_expiry(now.date()) >= 0:
                 continue
-            spot = self.data.underlying_price(position.contract.symbol) or 0.0
+            if not isinstance(self.broker, PaperBroker):
+                self.reconcile_halt = (
+                    "expired live position requires broker exercise reconciliation"
+                )
+                continue
+            spot = self.data.underlying_price(position.contract.symbol)
+            if spot is None or spot <= 0:
+                self.reconcile_halt = "expired position has no valid settlement reference"
+                continue
             value = intrinsic(spot, position.contract.strike, position.contract.right)
             self.broker.settle_expiration(position, value)
-            record = self.portfolio.close(key, value, ExitReason.EXPIRED)
+            record = self.portfolio.close(key, value, ExitReason.EXPIRED, at=now)
             if record:
                 assert self.risk is not None
                 self.risk.record_trade_result(record.pnl)
+                self._checkpoint()
                 log.info(
                     "settled expired %s at intrinsic $%.2f | P&L $%+.2f",
                     position.contract,
@@ -198,48 +261,74 @@ class TradingEngine:
         corrected, and — because a disagreement means the agent's view was wrong
         about something — new entries are held for the rest of the loop.
         """
-        orphans = self.portfolio.find_orphans(self.broker.positions())
-        for position in orphans:
-            mark = position.last_mark or position.entry_price
-            log.warning(
-                "%s is no longer held at the broker; booking it closed at the last mark $%.2f",
-                position.contract,
-                mark,
-            )
-            record = self.portfolio.close(position.contract.occ_symbol, mark, ExitReason.MANUAL)
-            if record:
-                assert self.risk is not None
-                self.risk.record_trade_result(record.pnl)
-                report.closed.append(f"{position.contract} (closed outside the agent)")
-
-        if orphans and self.halt_on_reconcile_mismatch:
-            report.reconcile_mismatch = (
-                f"{len(orphans)} position(s) disagreed with the broker; "
-                "holding new entries this loop"
-            )
+        actual = {p.contract.occ_symbol: p for p in self.broker.positions()}
+        expected = self.portfolio.positions
+        mismatches = []
+        for key in actual.keys() | expected.keys():
+            if key not in expected:
+                mismatches.append(f"broker-only holding {key}")
+            elif key not in actual:
+                mismatches.append(f"ledger-only holding {key}")
+            elif expected[key].quantity != actual[key].quantity:
+                mismatches.append(f"quantity mismatch {key}")
+        if mismatches:
+            self.reconcile_halt = "; ".join(mismatches)
+            report.reconcile_mismatch = self.reconcile_halt
+            if self.store:
+                self.store.event("reconciliation_required", {"reason": self.reconcile_halt})
+        # Never fabricate fills or clear a halt automatically. Verified repair is required.
 
     def _manage_exits(self, now: datetime, report: LoopReport) -> None:
+        if self.config.data_provider != "synthetic" and not self.data.is_market_open():
+            if self.store:
+                self.store.event("monitor_wait", {"reason": "market session unverified or closed"})
+            return
         for key, position in list(self.portfolio.positions.items()):
-            quote = self._quote_for(position)
-            if quote is None or not quote.is_tradeable():
+            try:
+                quote = self._quote_for(position)
+            except Exception:
+                log.exception("quote refresh failed for held %s", position.contract)
+                continue
+            if not self._usable(quote, now):
                 log.warning("no usable quote for %s; will retry next loop", position.contract)
                 continue
             if hasattr(self.broker, "mark"):
                 self.broker.mark(quote)  # type: ignore[attr-defined]
 
+            try:
+                earnings = self.data.next_earnings_date(position.contract.symbol)
+                direction, _ = self.signal.direction(position.contract.symbol, self.history)
+            except Exception:
+                earnings, direction = None, "none"
             decision = evaluate_exit(
                 position,
                 quote,
                 self.config.exit,
                 as_of=now,
-                earnings_date=self.data.next_earnings_date(position.contract.symbol),
+                earnings_date=earnings,
+                direction=direction,
             )
             self.portfolio.save()
+            if self.store:
+                self.store.event(
+                    "exit_decision",
+                    {
+                        "contract": str(position.contract),
+                        "mark": position.last_mark,
+                        "quote_at": quote.as_of,
+                        "reason": decision.detail,
+                        "exit": decision.should_exit,
+                    },
+                )
             if not decision.should_exit:
                 continue
 
             urgent = decision.urgency == "urgent"
-            fill = self._sell_with_reprice(position, quote, urgent)
+            try:
+                fill = self._sell_with_reprice(position, quote, urgent)
+            except Exception:
+                log.exception("exit submission uncertain for %s", position.contract)
+                continue
             if fill is None:
                 log.warning(
                     "exit order for %s did not fill (%s); retrying next loop",
@@ -249,11 +338,17 @@ class TradingEngine:
                 continue
 
             record = self.portfolio.close(
-                key, fill.price, decision.reason or ExitReason.MANUAL, fees=fill.fees
+                key,
+                fill.price,
+                decision.reason or ExitReason.MANUAL,
+                fees=fill.fees,
+                quantity=fill.quantity,
+                at=now,
             )
             if record:
                 assert self.risk is not None
                 self.risk.record_trade_result(record.pnl)
+                self._checkpoint()
                 log.info(
                     "closed %s: %s | P&L $%+.2f (%.1f%%)",
                     position.contract,
@@ -268,6 +363,16 @@ class TradingEngine:
 
     def _scan_entries(self, now: datetime, report: LoopReport, dry: bool = False) -> None:
         cfg = self.config
+        if cfg.data_provider != "synthetic":
+            local = now.astimezone(ZoneInfo(cfg.execution.timezone))
+            clock = local.strftime("%H:%M")
+            if (
+                not self.data.is_market_open()
+                or local.weekday() >= 5
+                or not cfg.execution.entry_window_start <= clock < cfg.execution.entry_window_end
+            ):
+                report.blocked_reason = "outside verified entry session"
+                return
         assert self.screener is not None
         if len(self.portfolio.positions) >= cfg.sizing.max_positions:
             report.blocked_reason = f"at max positions ({cfg.sizing.max_positions})"
@@ -275,6 +380,13 @@ class TradingEngine:
 
         equity = self.broker.equity()
         for symbol in cfg.universe.symbols:
+            if not dry:
+                allowed, reason = self.risk.can_open(
+                    self.broker.equity(), self.broker.day_trades_used()
+                )
+                if not allowed or self.orders.pending():
+                    report.blocked_reason = reason if not allowed else "unresolved order"
+                    break
             if len(self.portfolio.positions) >= cfg.sizing.max_positions:
                 break
             if self.portfolio.count_for_symbol(symbol) >= cfg.sizing.max_positions_per_symbol:
@@ -288,6 +400,10 @@ class TradingEngine:
             if not quotes:
                 continue
 
+            quotes = [q for q in quotes if self._usable(q, now)]
+            if cfg.entry.require_known_events and not self.data.earnings_known(symbol):
+                report.skipped.append(f"{symbol}: earnings calendar unavailable")
+                continue
             earnings = self.data.next_earnings_date(symbol)
             days_to_earnings = (earnings - now.date()).days if earnings else None
             candidates = self.screener.screen(
@@ -335,6 +451,18 @@ class TradingEngine:
                 )
                 continue
 
+            if self.store:
+                self.store.event(
+                    "entry_decision",
+                    {
+                        "contract": str(best.contract),
+                        "quote_at": best.quote.as_of,
+                        "bid": best.quote.bid,
+                        "ask": best.quote.ask,
+                        "quantity": sizing.contracts,
+                        "reasons": best.reasons,
+                    },
+                )
             fill = self._buy_with_reprice(best.quote, sizing.contracts, now)
             if fill is None:
                 report.skipped.append(
@@ -346,17 +474,19 @@ class TradingEngine:
             g = best.quote.greeks
             position = Position(
                 contract=best.contract,
-                quantity=sizing.contracts,
+                quantity=fill.quantity,
                 entry_price=fill.price,
                 opened_at=now,
                 entry_underlying=best.quote.underlying_price,
                 entry_iv=g.iv if g else 0.0,
                 entry_delta=g.delta if g else 0.0,
                 last_mark=fill.price,
+                entry_fees=fill.fees,
                 broker_order_id=fill.order_id,
                 notes="; ".join(best.reasons),
             )
             self.portfolio.add(position)
+            self._checkpoint()
             log.info(
                 "opened %s x%d @ $%.2f | %s",
                 best.contract,
@@ -431,32 +561,62 @@ class TradingEngine:
             return None
 
         ladder = self._concession_ladder(self.config.execution.entry_limit_offset)
+        if not self.broker.synchronous_fills:
+            if self.broker.has_open_order(contract.occ_symbol) is not False:
+                return None
+            ladder = ladder[:1]
         self.orders.reserve(order_id, contract, Side.BUY, quantity, self._entry_limit(quote))
         try:
             for concession in ladder:
                 limit = self._entry_limit(quote, concession)
                 fill = self.broker.buy_to_open(quote, quantity, limit)
                 if fill is not None:
-                    self.orders.mark(order_id, OrderState.FILLED, broker_order_id=fill.order_id)
+                    state = OrderState.FILLED if fill.quantity == quantity else OrderState.PENDING
+                    self.orders.mark(order_id, state, broker_order_id=fill.order_id)
                     return fill
         except Exception as exc:
-            # A raised exception means nothing rests at the broker.
-            self.orders.mark(order_id, OrderState.FAILED, detail=repr(exc))
+            # Timeout may mean accepted: retain the reservation until proven terminal.
+            self.orders.mark(order_id, OrderState.PENDING, detail=repr(exc))
             raise
 
         # Nothing filled. If the broker can tell us no order is working, release
         # the reservation so the next loop may try again. When it cannot, leave
-        # the order pending and let the stale-pending TTL free it, because
+        # the order pending until execution/cancellation is explicitly verified, because
         # assuming "not filled" on an ambiguous response is how you end up long
         # two contracts.
-        if self.broker.has_open_order(contract.occ_symbol) is False:
+        self.orders.mark(
+            order_id, OrderState.PENDING, broker_order_id=getattr(self.broker, "last_order_id", "")
+        )
+        if (
+            self.broker.synchronous_fills
+            and self.broker.has_open_order(contract.occ_symbol) is False
+        ):
             self.orders.mark(order_id, OrderState.FAILED, detail="no rung filled")
         return None
 
     def _sell_with_reprice(self, position: Position, quote: OptionQuote, urgent: bool):
-        # Exits are never suppressed by the duplicate guard. Selling a contract
-        # you no longer hold is rejected by the broker; failing to sell one you do
-        # hold is the expensive mistake.
+        if not self.broker.synchronous_fills:
+            key = position.contract.occ_symbol
+            if self.orders.has_pending_for(key) or self.broker.has_open_order(key) is not False:
+                return None
+            oid = client_order_id(position.contract, Side.SELL, position.quantity)
+            self.orders.reserve(
+                oid,
+                position.contract,
+                Side.SELL,
+                position.quantity,
+                self._exit_limit(quote, urgent),
+            )
+            fill = self.broker.sell_to_close(
+                position, quote, self._exit_limit(quote, urgent), urgent
+            )
+            if fill:
+                self.orders.mark(
+                    oid,
+                    OrderState.FILLED if fill.quantity == position.quantity else OrderState.PENDING,
+                    broker_order_id=fill.order_id,
+                )
+            return fill
         if urgent:
             return self.broker.sell_to_close(
                 position, quote, self._exit_limit(quote, True), urgent=True

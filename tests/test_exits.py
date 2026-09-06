@@ -36,13 +36,13 @@ def make_quote(position: Position, mark: float, iv: float = 0.30) -> OptionQuote
 
 def test_holds_while_flat():
     pos = make_position()
-    d = evaluate_exit(pos, make_quote(pos, 10.2), ExitConfig(), as_of=NOW)
+    d = evaluate_exit(pos, make_quote(pos, 10.2), ExitConfig(exit_mark="mid"), as_of=NOW)
     assert not d.should_exit
 
 
 def test_take_profit_arms_trailing_instead_of_selling():
     pos = make_position()
-    d = evaluate_exit(pos, make_quote(pos, 11.5), ExitConfig(), as_of=NOW)
+    d = evaluate_exit(pos, make_quote(pos, 11.5), ExitConfig(exit_mark="mid"), as_of=NOW)
     # +15% is past the target, but the trailing stop lets it run.
     assert not d.should_exit
     assert pos.trailing_armed
@@ -59,7 +59,7 @@ def test_take_profit_sells_when_trailing_disabled():
 
 def test_trailing_stop_fires_on_giveback():
     pos = make_position()
-    cfg = ExitConfig()
+    cfg = ExitConfig(exit_mark="mid")
     evaluate_exit(pos, make_quote(pos, 14.0), cfg, as_of=NOW)  # peak +40%
     assert pos.trailing_armed
     # Stop sits at 40% * (1 - 0.40) = +24%. Still above it at +30%.
@@ -70,7 +70,7 @@ def test_trailing_stop_fires_on_giveback():
 
 
 def test_trailing_stop_never_trails_below_the_target():
-    cfg = ExitConfig()
+    cfg = ExitConfig(exit_mark="mid")
     # Arithmetic would put the stop at +7.2%, but the floor holds it at +10%.
     assert trailing_stop_level(0.12, cfg) == pytest.approx(0.10)
     assert trailing_stop_level(0.50, cfg) == pytest.approx(0.30)
@@ -78,7 +78,7 @@ def test_trailing_stop_never_trails_below_the_target():
 
 def test_barely_profitable_position_exits_at_the_floor():
     pos = make_position()
-    cfg = ExitConfig()
+    cfg = ExitConfig(exit_mark="mid")
     evaluate_exit(pos, make_quote(pos, 11.2), cfg, as_of=NOW)  # arms at +12%
     d = evaluate_exit(pos, make_quote(pos, 10.9), cfg, as_of=NOW)  # falls to +9%
     assert d.should_exit
@@ -87,7 +87,7 @@ def test_barely_profitable_position_exits_at_the_floor():
 
 def test_hard_stop_loss():
     pos = make_position()
-    d = evaluate_exit(pos, make_quote(pos, 4.9), ExitConfig(), as_of=NOW)
+    d = evaluate_exit(pos, make_quote(pos, 4.9), ExitConfig(exit_mark="mid"), as_of=NOW)
     assert d.should_exit
     assert d.reason is ExitReason.STOP_LOSS
     assert d.urgency == "urgent"
@@ -95,7 +95,7 @@ def test_hard_stop_loss():
 
 def test_stop_loss_beats_trailing_stop_in_priority():
     pos = make_position()
-    cfg = ExitConfig()
+    cfg = ExitConfig(exit_mark="mid")
     evaluate_exit(pos, make_quote(pos, 15.0), cfg, as_of=NOW)  # arm the trail
     d = evaluate_exit(pos, make_quote(pos, 4.0), cfg, as_of=NOW)
     assert d.reason is ExitReason.STOP_LOSS
@@ -104,7 +104,7 @@ def test_stop_loss_beats_trailing_stop_in_priority():
 def test_expiry_guard_closes_regardless_of_pnl():
     for mark in (5.0, 10.0, 20.0):
         pos = make_position(dte=2)
-        d = evaluate_exit(pos, make_quote(pos, mark), ExitConfig(), as_of=NOW)
+        d = evaluate_exit(pos, make_quote(pos, mark), ExitConfig(exit_mark="mid"), as_of=NOW)
         assert d.should_exit
         assert d.reason is ExitReason.EXPIRY_GUARD
 
@@ -112,7 +112,7 @@ def test_expiry_guard_closes_regardless_of_pnl():
 def test_tighter_stop_near_expiry():
     pos = make_position(dte=5)
     # Down 35%: survives the -50% stop but not the near-expiry -30% one.
-    d = evaluate_exit(pos, make_quote(pos, 6.5), ExitConfig(), as_of=NOW)
+    d = evaluate_exit(pos, make_quote(pos, 6.5), ExitConfig(exit_mark="mid"), as_of=NOW)
     assert d.should_exit
     assert d.reason is ExitReason.STOP_LOSS
     assert "only 5d left" in d.detail
@@ -120,14 +120,16 @@ def test_tighter_stop_near_expiry():
 
 def test_time_stop_after_two_weeks():
     pos = make_position(opened_days_ago=14.5)
-    d = evaluate_exit(pos, make_quote(pos, 10.1), ExitConfig(), as_of=NOW)
+    d = evaluate_exit(pos, make_quote(pos, 10.1), ExitConfig(exit_mark="mid"), as_of=NOW)
     assert d.should_exit
     assert d.reason is ExitReason.TIME_STOP
 
 
 def test_earnings_exit():
     pos = make_position()
-    d = evaluate_exit(pos, make_quote(pos, 10.1), ExitConfig(), as_of=NOW, earnings_date=NOW.date())
+    d = evaluate_exit(
+        pos, make_quote(pos, 10.1), ExitConfig(exit_mark="mid"), as_of=NOW, earnings_date=NOW.date()
+    )
     assert d.should_exit
     assert "IV crush" in d.detail
 
@@ -145,7 +147,7 @@ def test_theta_bleed_exit_only_when_not_working():
 
 def test_peak_return_is_monotonic():
     pos = make_position()
-    cfg = ExitConfig()
+    cfg = ExitConfig(exit_mark="mid")
     for mark in (11.0, 13.0, 11.5, 12.0):
         evaluate_exit(pos, make_quote(pos, mark), cfg, as_of=NOW)
     assert pos.peak_return == pytest.approx(0.30, abs=1e-9)

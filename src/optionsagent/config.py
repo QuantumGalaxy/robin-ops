@@ -61,17 +61,11 @@ class UniverseConfig(BaseModel):
 class EntryConfig(BaseModel):
     """Filters applied to every contract before it can be bought."""
 
-    min_dte: int = 30
-    max_dte: int = 45
-    """Buy 30-45 DTE and plan to exit by ``max_hold_days``.
+    min_dte: int = 12
+    max_dte: int = 18
+    """User-requested 12–18 calendar-day contracts; experimental profiles are separate."""
 
-    The brief asked for 14-day contracts. Theta decay is roughly proportional to
-    1/sqrt(T), so the final two weeks are where an option bleeds fastest. Buying
-    30-45 DTE and closing after ~14 days captures the same two-week directional
-    window while paying materially less decay.
-    """
-
-    min_abs_delta: float = 0.45
+    min_abs_delta: float = 0.55
     max_abs_delta: float = 0.70
     """Slightly in-the-money. Delta ~0.60 means the option captures 60% of the
     underlying's move, needs a far smaller move to reach +10%, and has a much
@@ -97,6 +91,8 @@ class EntryConfig(BaseModel):
     min_premium: float = 0.75
     max_premium: float = 25.0
     avoid_earnings_within_days: int = 7
+    require_itm: bool = True
+    require_known_events: bool = True
     allowed_rights: list[Literal["call", "put"]] = Field(default_factory=lambda: ["call", "put"])
 
 
@@ -109,6 +105,8 @@ class ExitConfig(BaseModel):
     than 10%" behaviour from the brief."""
 
     trailing_enabled: bool = True
+    exit_on_signal_loss: bool = True
+    exit_mark: Literal["bid", "mid"] = "bid"
 
     trailing_mode: Literal["giveback_of_gain", "pct_of_peak_value"] = "giveback_of_gain"
     """How the trailing stop is measured, which matters more than it looks.
@@ -129,7 +127,7 @@ class ExitConfig(BaseModel):
     that means exiting at +15%, so the floor always stays above the +10% target."""
 
     trailing_floor_pct: float = 0.10
-    """The trailing stop can never trail below this. Locks in the brief's +10%."""
+    """Minimum trigger level; gaps, fees and execution can realize less."""
 
     stop_loss_pct: float = -0.50
     """-50% on premium, checked on every loop regardless of days remaining."""
@@ -155,6 +153,7 @@ class ExitConfig(BaseModel):
 
 
 class SizingConfig(BaseModel):
+    max_trade_premium: float = Field(default=1000.0, gt=0)
     risk_per_trade_pct: float = 0.02
     """Fraction of equity put at risk per trade. Because the stop is -50%, the
     position size is 2x this, i.e. 4% of equity of premium per position."""
@@ -199,12 +198,13 @@ class ExecutionConfig(BaseModel):
     """Same, for exits: 0.0 offers at mid, 1.0 hits the bid."""
 
     urgent_cross_spread: bool = True
-    """For stop-losses and expiry guards, cross to the bid to guarantee a fill."""
+    """For urgent exits, price at the bid. Execution is never guaranteed."""
 
     reprice_attempts: int = 3
     reprice_interval_seconds: int = 20
     max_slippage_pct: float = 0.05
     poll_interval_seconds: int = 60
+    max_quote_age_seconds: int = Field(default=120, gt=0)
     market_open: str = "09:30"
     market_close: str = "16:00"
     entry_window_start: str = "09:45"
@@ -252,6 +252,8 @@ class Mode(StrEnum):
 class Config(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPTIONSAGENT_", env_nested_delimiter="__")
 
+    data_provider: Literal["synthetic", "robinhood_mcp"] = "synthetic"
+    reference_data_file: str | None = None
     mode: Mode = Mode.PAPER
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
@@ -262,6 +264,20 @@ class Config(BaseSettings):
     market: MarketConfig = Field(default_factory=MarketConfig)
     broker: BrokerConfig = Field(default_factory=BrokerConfig)
     state_dir: str = "state"
+
+    @model_validator(mode="after")
+    def validate_safety(self) -> Config:
+        if self.state_dir != "state" and self.risk.kill_switch_file == "state/KILL":
+            self.risk.kill_switch_file = str(Path(self.state_dir) / "KILL")
+        if self.entry.min_dte > self.entry.max_dte:
+            raise ValueError("min_dte must not exceed max_dte")
+        if not 0 <= self.entry.min_abs_delta <= self.entry.max_abs_delta <= 1:
+            raise ValueError("delta bounds must be between zero and one")
+        if not -1 <= self.exit.stop_loss_pct < 0:
+            raise ValueError("stop_loss_pct must be negative and at least -1")
+        if not 0 <= self.exit.trailing_giveback_pct <= 1:
+            raise ValueError("trailing giveback must be between zero and one")
+        return self
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Config:

@@ -48,7 +48,7 @@ def size_position(
     if cash_cap <= 0:
         return SizingDecision(0, 0.0, 0.0, "cash reserve floor reached")
 
-    allowed = min(target_premium, premium_cap, cash_cap)
+    allowed = min(target_premium, premium_cap, cash_cap, cfg.max_trade_premium)
     contracts = int(allowed // price_per_contract)
     contracts = min(contracts, cfg.max_contracts)
 

@@ -13,6 +13,8 @@ from ..models import Fill, OptionQuote, Position
 
 
 class Broker(ABC):
+    synchronous_fills: bool = False
+
     @abstractmethod
     def equity(self) -> float:
         """Total account value, used for position sizing and risk limits."""

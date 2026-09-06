@@ -18,6 +18,7 @@ import math
 import statistics
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Literal
 
 Direction = Literal["call", "put", "none"]
@@ -31,6 +32,17 @@ class PriceHistory:
     _series: dict[str, deque[float]] = field(
         default_factory=lambda: defaultdict(lambda: deque(maxlen=120))
     )
+
+    _dates: dict[str, date] = field(default_factory=dict)
+
+    def replace(self, symbol, closes):
+        self._series[symbol] = deque(closes[-self.maxlen :], maxlen=self.maxlen)
+
+    def push_daily(self, symbol, price, day):
+        if self._dates.get(symbol) == day:
+            return
+        self._dates[symbol] = day
+        self.push(symbol, price)
 
     def push(self, symbol: str, price: float) -> None:
         self._series[symbol].append(price)

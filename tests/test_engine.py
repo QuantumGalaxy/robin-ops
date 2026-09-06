@@ -96,7 +96,7 @@ def test_expired_position_is_settled_not_leaked(tmp_path):
     assert engine.portfolio.trades[-1].reason is ExitReason.EXPIRED
 
 
-def test_reconcile_drops_a_position_closed_outside_the_agent(tmp_path):
+def test_reconcile_preserves_unverified_close_and_halts(tmp_path):
     _, market, broker, engine = build(tmp_path)
     for _ in range(40):
         market.step(1)
@@ -108,10 +108,10 @@ def test_reconcile_drops_a_position_closed_outside_the_agent(tmp_path):
 
     key = next(iter(engine.portfolio.positions))
     broker._positions.clear()
-    engine.run_once(as_of=now_for(market))
-    assert key not in engine.portfolio.positions
-    # It has to land in the trade log rather than silently disappearing.
-    assert engine.portfolio.trades[-1].reason is ExitReason.MANUAL
+    report = engine.run_once(as_of=now_for(market))
+    assert key in engine.portfolio.positions
+    assert "ledger-only" in report.blocked_reason
+    assert not engine.portfolio.trades
 
 
 def test_entry_limit_never_pays_more_than_the_ask(tmp_path):

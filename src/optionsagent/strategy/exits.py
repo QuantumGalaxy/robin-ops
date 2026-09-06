@@ -49,9 +49,10 @@ def evaluate_exit(
     *,
     as_of: datetime | None = None,
     earnings_date: date | None = None,
+    direction: str | None = None,
 ) -> ExitDecision:
     now = as_of or utcnow()
-    mark = quote.mid
+    mark = quote.bid if cfg.exit_mark == "bid" else quote.mid
     ret = position.unrealized_return(mark)
     dte = position.contract.days_to_expiry(now.date())
 
@@ -91,6 +92,15 @@ def evaluate_exit(
             f"{cfg.expiry_guard_loss_pct:+.0%})",
             urgency="urgent",
         )
+
+    # Direction is optional for offline rule replay; the live engine passes it.
+    if (
+        position.trailing_armed
+        and cfg.exit_on_signal_loss
+        and direction is not None
+        and direction != position.contract.right
+    ):
+        return ExitDecision(True, ExitReason.SIGNAL_LOSS, "direction no longer supports the trade")
 
     # 4. Profit taking.
     if cfg.trailing_enabled:

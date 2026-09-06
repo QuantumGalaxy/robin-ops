@@ -22,7 +22,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -79,7 +79,7 @@ class OrderRegistry:
 
     state_dir: Path = Path("state")
     orders: dict[str, OrderRecord] = field(default_factory=dict)
-    pending_ttl_minutes: int = 30
+    pending_ttl_minutes: int = 30  # Compatibility only: age never resolves an uncertain order.
 
     persist: bool = True
     """Set False for backtests. There is no crash to recover from in a simulated
@@ -102,16 +102,6 @@ class OrderRegistry:
         record = self.orders.get(order_id)
         if record is None:
             return False
-        if record.state == OrderState.PENDING.value and self._is_stale(record):
-            # A pending order this old is almost certainly dead. Keeping it
-            # forever would wedge the agent out of the contract permanently.
-            log.warning(
-                "order %s has been pending since %s; treating it as failed",
-                order_id,
-                record.created_at,
-            )
-            self.mark(order_id, OrderState.FAILED, detail="expired while pending")
-            return False
         return record.state in (OrderState.PENDING.value, OrderState.FILLED.value)
 
     def has_pending_for(self, occ_symbol: str) -> bool:
@@ -122,14 +112,9 @@ class OrderRegistry:
         working.
         """
         return any(
-            r.occ_symbol == occ_symbol
-            and r.state == OrderState.PENDING.value
-            and not self._is_stale(r)
+            r.occ_symbol == occ_symbol and r.state == OrderState.PENDING.value
             for r in self.orders.values()
         )
-
-    def _is_stale(self, record: OrderRecord) -> bool:
-        return utcnow() - record.created > timedelta(minutes=self.pending_ttl_minutes)
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -181,8 +166,7 @@ class OrderRegistry:
         try:
             data = json.loads(self.path.read_text())
         except json.JSONDecodeError:
-            log.error("order registry at %s is corrupt; starting a new one", self.path)
-            return
+            raise RuntimeError(f"Order registry is corrupt: {self.path}; trading blocked") from None
         for key, row in data.items():
             self.orders[key] = OrderRecord(**row)
         if self.pending():

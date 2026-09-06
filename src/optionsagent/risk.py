@@ -35,7 +35,8 @@ class RiskManager:
         if self.state.session_date != today:
             self.state.session_date = today
             self.state.session_start_equity = equity
-            self.state.halted_reason = ""
+            if self.state.halted_reason.startswith("daily loss limit"):
+                self.state.halted_reason = ""
         self.state.peak_equity = max(self.state.peak_equity, equity)
 
     def record_trade_result(self, pnl: float) -> None:

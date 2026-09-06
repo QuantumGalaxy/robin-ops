@@ -146,6 +146,8 @@ class HttpToolCaller:
         return list(result.get("tools", []))
 
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
+        if name.startswith(("place_", "cancel_")):
+            raise McpError("Live mutation tools are disabled in this simulation release")
         self._ensure_initialized()
         result = self._request("tools/call", {"name": name, "arguments": arguments}) or {}
         if result.get("isError"):

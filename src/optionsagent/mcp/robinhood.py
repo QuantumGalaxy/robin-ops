@@ -114,8 +114,7 @@ class RobinhoodMcp:
         try:
             available = {t.get("name") for t in self.caller.list_tools()}
         except Exception:
-            log.warning("could not enumerate MCP tools; skipping the capability check")
-            return []
+            raise RuntimeError("Cannot verify MCP capabilities; connection blocked") from None
         return [name for name in REQUIRED_TOOLS if name not in available]
 
     # ---- account ---------------------------------------------------------

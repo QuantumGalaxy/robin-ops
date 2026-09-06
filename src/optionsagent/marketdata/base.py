@@ -48,8 +48,11 @@ class MarketDataProvider(ABC):
         """Next confirmed or estimated earnings date, if known."""
         return None
 
+    def earnings_known(self, symbol: str) -> bool:
+        return False
+
     def is_market_open(self) -> bool:
-        return True
+        return False
 
     def close(self) -> None:
         return None

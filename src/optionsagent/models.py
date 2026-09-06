@@ -32,6 +32,7 @@ class ExitReason(StrEnum):
     THETA_BLEED = "theta_bleed"
     KILL_SWITCH = "kill_switch"
     MANUAL = "manual"
+    SIGNAL_LOSS = "signal_loss"
 
 
 @dataclass(frozen=True)
@@ -117,7 +118,18 @@ class OptionQuote:
         return self.mid * CONTRACT_MULTIPLIER
 
     def is_tradeable(self) -> bool:
-        return self.bid > 0 and self.ask > 0 and self.ask >= self.bid
+        return (
+            all(math.isfinite(x) for x in (self.bid, self.ask, self.underlying_price))
+            and self.bid > 0
+            and self.ask >= self.bid
+            and self.underlying_price > 0
+        )
+
+    def is_fresh(self, now: datetime, max_age: int) -> bool:
+        if self.as_of.tzinfo is None:
+            return False
+        age = (now - self.as_of).total_seconds()
+        return -5 <= age <= max_age
 
 
 @dataclass
@@ -136,6 +148,7 @@ class Position:
     """Best unrealised return ever seen, as a fraction. Drives the trailing stop."""
     trailing_armed: bool = False
     last_mark: float = 0.0
+    entry_fees: float = 0.0
     broker_order_id: str = ""
     notes: str = ""
 
@@ -185,7 +198,7 @@ class ExitDecision:
     reason: ExitReason | None = None
     detail: str = ""
     urgency: str = "normal"
-    """``normal`` prices at mid; ``urgent`` crosses toward the bid to guarantee a fill."""
+    """``normal`` prices at mid; ``urgent`` prices at the bid without guaranteeing execution."""
 
 
 @dataclass

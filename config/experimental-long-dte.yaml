@@ -1,5 +1,3 @@
-mode: paper
-data_provider: synthetic
 # The recommended parameter set. These are also the code defaults, written out
 # here so the differences from config/brief.yaml are visible in one diff.
 #
@@ -29,14 +27,13 @@ universe:
     - SPY
 
 entry:
-  require_itm: true
-  require_known_events: true
-  # User-requested profile. The longer-DTE experiment is a separate config.
-  min_dte: 12
-  max_dte: 18
+  # Buy 30-45 DTE and exit after ~14 days rather than buying 14 DTE outright.
+  # Same two-week directional window, far less time decay paid for it.
+  min_dte: 30
+  max_dte: 45
   # Slightly in-the-money. A 0.60-delta contract reaches +10% on a much smaller
   # stock move than a cheap out-of-the-money one, and its spread is tighter.
-  min_abs_delta: 0.55
+  min_abs_delta: 0.45
   max_abs_delta: 0.70
   # A round trip costs the spread twice. Above ~6% the +10% target is unreachable.
   max_spread_pct: 0.06
@@ -68,7 +65,6 @@ exit:
   earnings_exit_days: 1
 
 sizing:
-  max_trade_premium: 1000.0
   # 2% of equity at risk per trade; with a -50% stop that is 4% of equity in premium.
   risk_per_trade_pct: 0.02
   max_positions: 6

@@ -63,24 +63,39 @@ class Portfolio:
         return sum(p.cost_basis for p in self.positions.values())
 
     def close(
-        self, occ_symbol: str, exit_price: float, reason: ExitReason, fees: float = 0.0
+        self,
+        occ_symbol: str,
+        exit_price: float,
+        reason: ExitReason,
+        fees: float = 0.0,
+        quantity: int | None = None,
+        at: datetime | None = None,
     ) -> TradeRecord | None:
-        pos = self.positions.pop(occ_symbol, None)
+        pos = self.positions.get(occ_symbol)
         if pos is None:
             return None
-        pnl = pos.unrealized_pnl(exit_price) - fees
+        qty = pos.quantity if quantity is None else quantity
+        if not 0 < qty <= pos.quantity:
+            raise ValueError("Fill quantity is outside the held quantity")
+        entry_fees = pos.entry_fees * qty / pos.quantity
+        total_fees = entry_fees + fees
+        pnl = (exit_price - pos.entry_price) * 100 * qty - total_fees
         record = TradeRecord(
             contract=str(pos.contract),
-            quantity=pos.quantity,
+            quantity=qty,
             entry_price=pos.entry_price,
             exit_price=exit_price,
             opened_at=pos.opened_at,
-            closed_at=utcnow(),
+            closed_at=at or utcnow(),
             reason=reason,
             pnl=pnl,
-            return_pct=pos.unrealized_return(exit_price),
-            fees=fees,
+            return_pct=pnl / (pos.entry_price * 100 * qty),
+            fees=total_fees,
         )
+        pos.quantity -= qty
+        pos.entry_fees -= entry_fees
+        if pos.quantity == 0:
+            self.positions.pop(occ_symbol)
         self.trades.append(record)
         self.realized_pnl += pnl
         self._append_trade(record)
@@ -150,6 +165,9 @@ class Portfolio:
                     "peak_return": p.peak_return,
                     "trailing_armed": p.trailing_armed,
                     "last_mark": p.last_mark,
+                    "entry_fees": p.entry_fees,
+                    "notes": p.notes,
+                    "broker_order_id": p.broker_order_id,
                 }
                 for p in self.positions.values()
             ],
@@ -183,7 +201,17 @@ class Portfolio:
                 peak_return=float(row.get("peak_return", 0.0)),
                 trailing_armed=bool(row.get("trailing_armed", False)),
                 last_mark=float(row.get("last_mark", 0.0)),
+                entry_fees=float(row.get("entry_fees", 0.0)),
+                notes=row.get("notes", ""),
+                broker_order_id=row.get("broker_order_id", ""),
             )
+        if pf.trade_log.exists():
+            for line in pf.trade_log.read_text().splitlines():
+                row = json.loads(line)
+                row["opened_at"] = datetime.fromisoformat(row["opened_at"])
+                row["closed_at"] = datetime.fromisoformat(row["closed_at"])
+                row["reason"] = ExitReason(row["reason"])
+                pf.trades.append(TradeRecord(**row))
         log.info("restored %d position(s) from %s", len(pf.positions), pf.state_file)
         return pf
 

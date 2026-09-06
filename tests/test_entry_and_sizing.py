@@ -36,6 +36,7 @@ def build_quote(
 
 
 def screener(**overrides) -> EntryScreener:
+    overrides = {"min_dte": 30, "max_dte": 45, **overrides}
     return EntryScreener(cfg=EntryConfig(**overrides), target_return=0.10, horizon_days=14.0)
 
 
@@ -73,25 +74,25 @@ def test_move_in_sigmas_scales_with_volatility():
 
 
 def test_screener_accepts_a_reasonable_contract():
-    out = screener().screen([build_quote()], "call", as_of=TODAY)
+    out = screener().screen([build_quote()], "call", as_of=TODAY, iv_rank=0.3)
     assert len(out) == 1
     assert 0.45 <= abs(out[0].delta) <= 0.70
 
 
 def test_screener_rejects_wide_spreads():
-    assert screener().screen([build_quote(spread_pct=0.25)], "call", as_of=TODAY) == []
+    assert screener().screen([build_quote(spread_pct=0.25)], "call", as_of=TODAY, iv_rank=0.3) == []
 
 
 def test_screener_rejects_illiquid_contracts():
-    assert screener().screen([build_quote(oi=10)], "call", as_of=TODAY) == []
+    assert screener().screen([build_quote(oi=10)], "call", as_of=TODAY, iv_rank=0.3) == []
 
 
 def test_screener_rejects_wrong_direction():
-    assert screener().screen([build_quote(right="put")], "call", as_of=TODAY) == []
+    assert screener().screen([build_quote(right="put")], "call", as_of=TODAY, iv_rank=0.3) == []
 
 
 def test_screener_rejects_short_dated_contracts():
-    assert screener().screen([build_quote(dte=10)], "call", as_of=TODAY) == []
+    assert screener().screen([build_quote(dte=10)], "call", as_of=TODAY, iv_rank=0.3) == []
 
 
 def test_screener_rejects_expensive_volatility():
@@ -102,24 +103,24 @@ def test_screener_rejects_expensive_volatility():
 
 def test_screener_avoids_earnings():
     quotes = [build_quote()]
-    assert screener().screen(quotes, "call", days_to_earnings=3, as_of=TODAY) == []
-    assert screener().screen(quotes, "call", days_to_earnings=30, as_of=TODAY) != []
+    assert screener().screen(quotes, "call", days_to_earnings=3, as_of=TODAY, iv_rank=0.3) == []
+    assert screener().screen(quotes, "call", days_to_earnings=30, as_of=TODAY, iv_rank=0.3) != []
 
 
 def test_screener_returns_nothing_without_a_direction():
-    assert screener().screen([build_quote()], "none", as_of=TODAY) == []
+    assert screener().screen([build_quote()], "none", as_of=TODAY, iv_rank=0.3) == []
 
 
 def test_ranking_prefers_the_cheaper_spread():
     tight = build_quote(strike=195.0, spread_pct=0.01)
     wide = build_quote(strike=195.0, spread_pct=0.05)
-    ranked = screener().screen([wide, tight], "call", as_of=TODAY)
+    ranked = screener().screen([wide, tight], "call", as_of=TODAY, iv_rank=0.3)
     assert ranked[0].quote.spread_pct < ranked[-1].quote.spread_pct
 
 
 def test_sizing_risks_the_configured_fraction():
     q = build_quote()
-    cfg = SizingConfig(risk_per_trade_pct=0.02, max_contracts=50)
+    cfg = SizingConfig(risk_per_trade_pct=0.02, max_contracts=50, max_trade_premium=5000)
     d = size_position(q, equity=100_000, buying_power=100_000, open_premium=0, cfg=cfg)
     # 2% of 100k risked against a 50% stop means about 4k of premium.
     assert d.risk_dollars == pytest.approx(2_000, rel=0.25)

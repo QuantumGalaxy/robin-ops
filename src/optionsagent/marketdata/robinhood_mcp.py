@@ -13,12 +13,14 @@ implementation means the paper and live paths cannot diverge numerically.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from pathlib import Path
 
 from ..greeks import compute_greeks, implied_vol, years_to_expiry
-from ..mcp.client import McpError, ToolCaller
+from ..mcp.client import ToolCaller
 from ..mcp.robinhood import RobinhoodMcp, as_date, as_float, as_int, pick
 from ..models import OptionContract, OptionQuote
 from .base import MarketDataProvider
@@ -31,6 +33,7 @@ QUOTE_BATCH_SIZE = 50
 @dataclass
 class RobinhoodMcpMarketData(MarketDataProvider):
     caller: ToolCaller
+    reference_data_file: str | None = None
     risk_free_rate: float = 0.042
     dividend_yield: float = 0.0
     _instruments: dict[str, list[dict]] = field(default_factory=dict, init=False)
@@ -62,28 +65,12 @@ class RobinhoodMcpMarketData(MarketDataProvider):
         return price or None
 
     def historical_closes(self, symbol: str, days: int = 90) -> list[float]:
-        """Daily closes for the signal warm-up.
-
-        Equity historicals are not part of the documented option tool surface, so
-        this is attempted opportunistically and degrades to an empty list. When it
-        comes back empty the agent simply accumulates closes as it runs, which
-        means roughly a month of loops before the trend filter produces a
-        direction. Point a real data source at this method if that matters.
-        """
-        for tool in ("get_equity_historicals", "get_historicals", "get_stock_historicals"):
-            try:
-                payload = self.caller.call(
-                    tool, {"symbol": symbol, "interval": "day", "span": "3month"}
-                )
-            except McpError:
-                continue
-            from ..mcp.robinhood import rows
-
-            closes = [as_float(pick(r, "close_price", "close", "c")) for r in rows(payload)]
-            closes = [c for c in closes if c > 0]
-            if closes:
-                return closes[-days:]
-        log.debug("no equity historicals tool available; signal will warm up from live polls")
+        """Completed daily bars from the timestamped reference feed."""
+        # Timestamped reference feed contains completed daily bars only.
+        reference = self._reference().get("symbols", {}).get(symbol, {})
+        closes = reference.get("daily_closes", [])
+        if closes:
+            return [float(c) for c in closes[-days:] if float(c) > 0]
         return []
 
     # ---- option chain ----------------------------------------------------
@@ -113,7 +100,15 @@ class RobinhoodMcpMarketData(MarketDataProvider):
         if bid <= 0 or ask <= 0 or ask < bid:
             return None
 
+        stamp = pick(row, "updated_at", "as_of", "timestamp")
+        try:
+            at = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if at.tzinfo is None:
+            return None
         quote = OptionQuote(
+            as_of=at,
             contract=contract,
             bid=bid,
             ask=ask,
@@ -203,16 +198,44 @@ class RobinhoodMcpMarketData(MarketDataProvider):
                 return self._build_quote(quotes[0], contract, spot)
         return None
 
-    def iv_rank(self, symbol: str) -> float:
-        """Approximate IV rank from IVs seen during this process's lifetime.
+    def _reference(self) -> dict:
+        """A current, sourced snapshot from a separate data feed; unknown fails closed."""
+        if not self.reference_data_file:
+            return {}
+        try:
+            data = json.loads(Path(self.reference_data_file).read_text())
+            stamp = datetime.fromisoformat(data["as_of"].replace("Z", "+00:00"))
+            age = (datetime.now(UTC) - stamp).total_seconds()
+            if not 0 <= age <= 86400 or not data.get("source"):
+                return {}
+            return data
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}
 
-        A placeholder, exactly as in the unofficial adapter: a real deployment
-        needs 52 weeks of at-the-money IV per symbol. Until that history exists
-        this trends to 0.5, making the IV filter permissive rather than wrongly
-        restrictive.
-        """
-        hist = self._iv_history.get(symbol, [])
-        if len(hist) < 30:
-            return 0.5
-        lo, hi = min(hist), max(hist)
-        return (hist[-1] - lo) / (hi - lo) if hi > lo else 0.5
+    def iv_rank(self, symbol: str) -> float | None:
+        row = self._reference().get("symbols", {}).get(symbol, {})
+        value = row.get("iv_rank")
+        # Caller must provide trailing daily ATM IV rank, never cross-strike IVs.
+        if not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            return None
+        if row.get("iv_history_days", 0) < 200:
+            return None
+        return float(value)
+
+    def earnings_known(self, symbol: str) -> bool:
+        row = self._reference().get("symbols", {}).get(symbol, {})
+        if row.get("earnings_checked") is not True or "earnings" not in row:
+            return False
+        return row["earnings"] is None or as_date(row["earnings"]) is not None
+
+    def next_earnings_date(self, symbol: str) -> date | None:
+        return as_date(self._reference().get("symbols", {}).get(symbol, {}).get("earnings"))
+
+    def is_market_open(self) -> bool:
+        session = self._reference().get("session", {})
+        try:
+            opened = datetime.fromisoformat(session["open"].replace("Z", "+00:00"))
+            closed = datetime.fromisoformat(session["close"].replace("Z", "+00:00"))
+            return opened <= datetime.now(UTC) < closed
+        except (KeyError, TypeError, ValueError):
+            return False

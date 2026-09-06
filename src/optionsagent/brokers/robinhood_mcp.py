@@ -41,6 +41,7 @@ class RobinhoodMcpBroker(Broker):
     dry_run: bool = True
     require_approval: bool = False
     approval_callback: ApprovalCallback | None = None
+    last_order_id: str = ""
     time_in_force: str = "gfd"
     """Good for day. A resting GTC order can fill days later against a thesis that
     no longer holds, which is precisely what an unattended agent must not allow."""
@@ -87,8 +88,7 @@ class RobinhoodMcpBroker(Broker):
             # Average price is quoted per contract by some endpoints and per share
             # by others. Normalise to per share, which is what Position expects.
             avg = as_float(pick(row, "average_price", "average_open_price", "avg_price"))
-            if avg > strike:
-                avg /= 100.0
+            # Schema contract: average_price is per share. Never infer units from strike.
             out.append(
                 Position(
                     contract=OptionContract(
@@ -157,22 +157,20 @@ class RobinhoodMcpBroker(Broker):
 
         result = self.api.place_order(**payload)
         order_id = str(pick(result, "id", "order_id", default=""))
+        self.last_order_id = order_id
         if not order_id:
             log.error("place_option_order returned no order id: %s", result)
             return None
 
-        # An accepted order is not a filled order. Report the fill price the broker
-        # gives us and fall back to the limit only when it has not filled yet.
         state = str(pick(result, "state", "status", default="")).lower()
-        fill_price = as_float(pick(result, "average_price", "price"), limit_price)
-        if fill_price > contract.strike:
-            fill_price /= 100.0
-        if state and state not in ("filled", "partially_filled"):
-            log.info("order %s accepted in state '%s'; awaiting fill", order_id, state)
+        if state not in ("filled", "partially_filled"):
             return None
-
-        filled = as_int(pick(result, "quantity", "filled_quantity"), quantity)
-        return Fill(contract, side, filled or quantity, fill_price, order_id=order_id)
+        # Explicit per-share execution price and cumulative executed quantity only.
+        fill_price = as_float(result.get("average_price"))
+        filled = as_int(result.get("filled_quantity"))
+        if fill_price <= 0 or not 0 < filled <= quantity:
+            raise ValueError("Unverified fill schema; reconcile order before proceeding")
+        return Fill(contract, side, filled, fill_price, order_id=order_id)
 
     def buy_to_open(self, quote: OptionQuote, quantity: int, limit_price: float) -> Fill | None:
         return self._submit(quote.contract, Side.BUY, quantity, limit_price)

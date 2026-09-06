@@ -197,6 +197,9 @@ class SyntheticMarketData(MarketDataProvider):
             path.append(price)
         return list(reversed(path))
 
+    def earnings_known(self, symbol: str) -> bool:
+        return True
+
     def next_earnings_date(self, symbol: str) -> date | None:
         st = self.state.get(symbol)
         return st.earnings if st else None

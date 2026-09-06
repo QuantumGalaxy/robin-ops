@@ -1,112 +1,89 @@
 # optionsagent
 
-A rule-based options trading agent: it screens a fixed universe of liquid large caps,
-buys single long calls or puts that pass a Greeks-aware filter, and manages every
-position with automated exits — take profit, trailing stop, hard stop, expiry guard,
-and time stop.
+Simulation-first options agent with a deterministic scanner, contract selector,
+risk controls, exit rules, durable account state, and a terminal dashboard.
 
-It runs end to end with no brokerage account. Paper trading against a synthetic
-options market is the default; Robinhood is an optional adapter that stays in dry-run
-mode until you explicitly turn it off.
+**Live execution is disabled.** This release repairs the review's safety issues;
+it does not claim a validated broker integration or a profitable strategy.
+The HTTP MCP transport refuses placement/cancellation calls. The unofficial
+Robinhood adapter is legacy code and is not reachable from the supported runner.
 
-> **This is not financial advice, and the strategy is not proven profitable.**
-> Long options can and regularly do lose 100% of the premium paid. Read
-> [`docs/DESIGN.md`](docs/DESIGN.md) before risking money — in particular the section
-> on why a +10% / -50% rule pair needs an 83% win rate just to break even, and the one
-> on why exit rules are not an edge.
+## Run locally
 
-## Quick start
-
-```bash
-uv venv && uv pip install -e ".[dev]"
-source .venv/bin/activate
-
-optionsagent explain                    # what delta/gamma/theta/vega do here
-optionsagent math                       # the break-even arithmetic of the exit rules
-optionsagent chain NVDA --direction call  # screen a chain and rank the candidates
-optionsagent run --loops 5              # paper-trade five loops
-optionsagent status                     # open positions and closed-trade stats
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e ".[dev]"
+optionsagent run --config config/recommended.yaml --loops 20
+optionsagent status
+optionsagent dashboard
 ```
 
-Compare the rules as originally specified against the recommended set:
+Each synthetic loop advances one calendar day by default. Use `--advance-days`
+to change that, or `--loops -1` to continue at the configured polling interval.
+The dashboard is a read-only terminal view. Ctrl-C closes it without stopping
+another running agent.
 
-```bash
-optionsagent simulate \
-  --config config/recommended.yaml \
-  --compare config/brief.yaml \
-  --worlds 30 --days 180
+## Strategy profile
+
+- 12–18 DTE, explicitly ITM calls/puts, absolute delta 0.55–0.70.
+- Maximum $1,000 premium per trade plus portfolio/cash/position limits.
+- Reject missing IV history, unknown earnings calendars, invalid quotes and
+  stale live quotes. No qualifying candidate means no trade.
+- +10% on the option bid activates trailing protection. Direction deterioration,
+  configured trailing drawdown, hard loss, theta, time and expiry rules can exit.
+  A trigger is not a guaranteed execution price or guaranteed profit.
+- The loss threshold remains configurable (default -50%, with a tighter
+  near-expiry rule); this is an experiment, not a validated risk recommendation.
+- `config/experimental-long-dte.yaml` retains the earlier 30–45 DTE experiment.
+  `config/brief.yaml` is an older comparison profile, not the current requirements.
+
+## Operating boundaries
+
+`off` makes no account/data calls. `scan_only` produces candidates but neither
+opens nor closes positions. `paper` requires the paper broker. Both live modes
+and `--live` refuse startup. Market data is selected independently using
+`data_provider: synthetic` or `robinhood_mcp`.
+
+For paper trading against MCP quotes, set `data_provider: robinhood_mcp`, keep
+`broker.kind: paper`, and supply `ROBINHOOD_MCP_TOKEN` through your environment.
+Use `optionsagent mcp-probe` for read-only schema discovery. Do not commit tokens.
+The provider requires timestamped quotes and a current sourced reference-data
+snapshot for daily closes, historical ATM IV rank, earnings and exchange sessions.
+See [reference data and remaining integration work](docs/REVIEW-FIXES.md).
+Without these inputs it correctly reports no trade.
+
+## Persistence, recovery and audit
+
+The runner checkpoints paper cash, holdings, trade history, risk state, pending
+orders, price history and synthetic market/RNG state together in SQLite at
+`state/runtime.sqlite3`. Order intent is reserved before submission. Unknown
+outcomes stay pending indefinitely; a timeout or an empty open-order list is
+not evidence of cancellation. Only synchronous paper fills may be retried.
+
+One process may own a state directory. Use different directories for different
+accounts/data sources. Legacy JSON exports remain available, but the database
+is authoritative. Legacy holdings without a complete account checkpoint refuse
+automatic migration, rather than resetting cash and fabricating closed trades.
+Back up the full state directory before any manual repair.
+
+Reconciliation compares holdings both ways and checks quantities. Mismatches
+latch an entry halt and are recorded for investigation, never booked as fictional
+fills. The audit table records decisions, quotes used, errors and loop summaries.
+
+```sh
+touch state/KILL   # pause new entries; position monitoring continues
 ```
 
-## What it does
+## Verification
 
-Each loop, in this order:
-
-1. refreshes account equity and registers the session with the risk manager;
-2. reconciles its ledger against the broker's actual positions;
-3. evaluates exits on everything held — **always before** looking for new trades;
-4. scans for entries, if risk limits allow.
-
-Entry requires a directional signal and a contract that survives filters on delta,
-theta, gamma, bid-ask spread, open interest, IV rank, and — the important one — the
-size of the underlying move needed to reach the profit target. Exits follow the rules
-in `config/recommended.yaml`, evaluated most-protective-first.
-
-## Layout
-
-| Path | What lives there |
-| --- | --- |
-| `src/optionsagent/greeks.py` | Black-Scholes pricing, Greeks, implied-vol solver |
-| `src/optionsagent/strategy/exits.py` | The exit rule engine |
-| `src/optionsagent/strategy/entry.py` | Contract screening and ranking |
-| `src/optionsagent/strategy/signals.py` | Directional signal (the replaceable part) |
-| `src/optionsagent/strategy/sizing.py` | Position sizing derived from the stop |
-| `src/optionsagent/risk.py` | Daily loss limit, drawdown halt, PDT protection, kill switch |
-| `src/optionsagent/engine.py` | The agent loop |
-| `src/optionsagent/simulate.py` | Monte Carlo evaluation of a rule set |
-| `src/optionsagent/marketdata/` | Synthetic and Robinhood data providers |
-| `src/optionsagent/brokers/` | Paper and Robinhood order routing |
-| `config/` | `recommended.yaml` and `brief.yaml` for head-to-head runs |
-| `docs/DESIGN.md` | The design rationale, and what to change before trading it |
-| `docs/DESIGN-REVIEW.md` | Review of the original brief, plus the experiment results |
-| `scripts/sweep.py` | Runs the stop / target / delta / DTE experiment matrix |
-
-## Connecting Robinhood
-
-Robinhood publishes no supported retail options API. The adapter drives the private
-endpoints used by the mobile app through [`robin_stocks`](https://github.com/jmfernandes/robin_stocks),
-which is against the spirit of their terms of service and breaks without notice. Read
-the header of `src/optionsagent/marketdata/robinhood.py` before going further.
-
-```bash
-uv pip install -e ".[robinhood]"
-export ROBINHOOD_USERNAME=... ROBINHOOD_PASSWORD=... ROBINHOOD_MFA_SECRET=...
-```
-
-Set `broker.kind: robinhood` in your config. Orders are logged and **not** submitted
-until you pass `--live`, which prompts for confirmation.
-
-## Stopping it
-
-```bash
-touch state/KILL     # blocks all new entries immediately; exits keep running
-```
-
-The kill switch is deliberately a file, so you can stop the agent from any shell
-without an API call or a restart.
-
-## Safety properties
-
-- Long options only. There is no code path that opens a short position, so the worst
-  case on any single trade is the premium paid.
-- Limit orders only. Nothing sends a market order.
-- Risk checks can block entries but can never block an exit.
-- Position state is persisted after every change, so a restart resumes with trailing
-  stops and high-water marks intact.
-- The loop never dies on a transient data error; open positions still get managed.
-
-## Tests
-
-```bash
+```sh
 pytest -q
 ruff check .
 ```
+
+Tests cover queued orders, timeouts, partial fills, strict modes, corrupt state,
+full restart recovery, reconciliation, quote freshness, costs and profit-lock.
+Synthetic sweeps are mechanical stress tests, not historical backtests or
+out-of-sample evidence. Previously published sweep statistics predate these fixes
+and must not be used to select live parameters.

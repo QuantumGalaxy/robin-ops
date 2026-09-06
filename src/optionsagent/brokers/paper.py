@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from ..greeks import CONTRACT_MULTIPLIER
@@ -25,6 +25,8 @@ REGULATORY_FEE_PER_CONTRACT = 0.06
 
 @dataclass
 class PaperBroker(Broker):
+    synchronous_fills = True
+
     starting_equity: float = 25_000.0
     seed: int = 11
     fill_aggression: float = 0.5
@@ -43,7 +45,6 @@ class PaperBroker(Broker):
         self._rng = random.Random(self.seed)
         self._day_trades: list[date] = []
         self._marks: dict[str, float] = {}
-        self.fills: list[Fill] = field(default_factory=list)  # type: ignore[assignment]
         self.fills = []
 
     # ---- account ---------------------------------------------------------
