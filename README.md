@@ -67,6 +67,8 @@ in `config/recommended.yaml`, evaluated most-protective-first.
 | `src/optionsagent/brokers/` | Paper and Robinhood order routing |
 | `config/` | `recommended.yaml` and `brief.yaml` for head-to-head runs |
 | `docs/DESIGN.md` | The design rationale, and what to change before trading it |
+| `docs/DESIGN-REVIEW.md` | Review of the original brief, plus the experiment results |
+| `scripts/sweep.py` | Runs the stop / target / delta / DTE experiment matrix |
 
 ## Connecting Robinhood
 
