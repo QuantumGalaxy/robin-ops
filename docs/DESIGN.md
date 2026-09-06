@@ -52,8 +52,8 @@ There are three ways out, and the design uses all three:
   the average loss.
 - **Pick contracts where +10% is a small move.** Covered in section 4.
 
-After those changes the realised distribution in simulation is a +27.9% average win
-against a -38.5% average loss at a 61.6% hit rate, which needs 58% to break even
+After those changes the realised distribution in simulation is a +27.3% average win
+against a -38.7% average loss at a 61.6% hit rate, which needs 58.6% to break even
 instead of 83%. Still demanding, but on the right side of possible.
 
 ---
@@ -148,13 +148,13 @@ $0.06 per contract per side. That is noise next to the spread.
 This is the most expensive rule in the set. Holding a long option to expiry means
 holding through the period of maximum decay and maximum gamma, and the terminal
 outcome for an out-of-the-money contract is a total loss. Your -50% stop does not
-protect you either, because in the final days an option can gap from -40% to -100%
-between two polls of a one-minute loop.
+protect you either: in the final days an option can gap from -40% to worthless
+overnight, and a polling loop cannot sell into a move it never saw.
 
 Replace it with three exits that all fire well before expiry:
 
 - **Expiry guard**: close everything at 3 DTE regardless of P&L.
-- **Near-expiry stop**: tighten from -50% to -30% inside the final week.
+- **Near-expiry stop**: tighten from -50% to -30% once inside 6 days.
 - **Decay stop**: if the contract is bleeding more than 4%/day and is not yet working,
   the remaining premium is better redeployed.
 
@@ -211,33 +211,45 @@ Output over 40 markets x 250 days (raw data in `simulation-results.json`):
 
 | Metric | Recommended | Your rules as stated |
 | --- | --- | --- |
-| Win rate | 61.6% | 70.2% |
+| Trades per world | 231 | 1,462 |
+| Win rate | 61.6% | 69.5% |
 | Break-even win rate needed | 83.3% | 83.3% |
-| Average win | +27.9% | +27.2% |
-| Average loss | -38.5% | -60.5% |
-| Profit factor | 1.14 | 1.04 |
-| Median account return | +10.2% | +7.3% |
-| 5th percentile outcome | -22.4% | **-84.8%** |
-| Average max drawdown | -20.3% | -66.2% |
+| Average win | +27.3% | +28.5% |
+| Average loss | -38.7% | -61.3% |
+| **Expectancy per trade** | **+1.97%** | **+1.11%** |
+| Profit factor | 1.12 | 1.05 |
+| Median account return | +6.5% | +38.2% |
+| 5th percentile outcome | -22.4% | **-78.7%** |
+| Average max drawdown | -20.8% | **-69.2%** |
+| Kelly-implied position size | 7.2% | 3.9% |
 
-The pattern is the point, not the digits. Your rules produce the *higher* win rate —
-taking profits at +10% wins often, exactly as intended — and still barely clear
-break-even, because the average loss is more than twice the average win. Plug the
-realised numbers back into the same formula: `60.5 / (27.2 + 60.5) = 69%` break-even
-against a 70.2% actual hit rate. The entire margin is one percentage point of win rate.
+Read the rows in that order, because the headline row is misleading on its own.
 
-The recommended set wins less often and makes more, because the trailing stop lets
-winners past +10% while the tighter near-expiry stop keeps losses to -38.5%. Its
-break-even requirement drops to `38.5 / (27.9 + 38.5) = 58%` against a 61.6% hit rate —
-a thinner strategy on paper, with a genuine buffer instead of a rounding error.
+Your rules produce the *higher* win rate — taking profits at +10% wins often, exactly
+as intended — and still barely clear break-even. Plug the realised numbers back into
+the same formula from section 2: `61.3 / (28.5 + 61.3) = 68.3%` needed against a 69.5%
+actual hit rate. **The entire margin is 1.2 percentage points of win rate.** Anything
+that nudges the hit rate — a wider spread, a slower fill, a worse month — puts it
+underwater.
 
-The drawdown column is the part I would not ignore. A 5th-percentile outcome of -85%
-is not a bad quarter, it is the account gone, and it comes from holding to expiry
-combined with sizing that puts 60% of equity into premium.
+The recommended set wins less often and earns nearly twice as much per trade, because
+the trailing stop lets winners past +10% while the tighter near-expiry stop holds
+losses to -38.7%. Its break-even requirement is `38.7 / (27.3 + 38.7) = 58.6%` against
+a 61.6% hit rate: a three-point buffer instead of a one-point one.
+
+**The median return column favours your rules, and I want to be straight about why.**
+That config takes six times as many trades with 60% of equity deployed instead of 25%.
+In a synthetic market with positive drift and a thin positive edge, leverage compounds
+and wins. It is the same reason the 95th percentile is +522%. But look one row down:
+a 5th-percentile outcome of **-78.7%** and an average maximum drawdown of **-69%**.
+That is not a bad quarter, that is the account gone, and it happens in a *benign*
+simulated market. Kelly, which sizes bets from the actual edge, says the recommended
+rules justify roughly twice the position size — which is the formal way of saying your
+config bets far more on a materially thinner edge.
 
 **Read the absolute returns with real suspicion.** The synthetic market has a positive
-drift and no macro regimes, so both columns look better than they would in reality.
-The comparison between columns is meaningful; the levels are not a forecast.
+drift and no macro regimes, so both columns look better than reality. The comparison
+between columns is what carries information; the levels are not a forecast.
 
 ---
 
@@ -306,6 +318,16 @@ fits, but you should know the constraint is binding. Your options are to accept 
 narrower effective universe, raise risk per trade (and accept the drawdown), or use
 vertical spreads to cut per-position cost — the last being the genuinely correct answer,
 and the most natural next feature.
+
+**What none of this protects against.** Every stop here is a *trigger*, not a
+guaranteed fill price. The agent looks at the market, decides to sell, and sends an
+order; the market does not wait. In paper runs I have watched a position go from +26%
+to -22% between two observations, blowing straight through a trailing stop that should
+have exited around +16%. Overnight gaps, halted stocks, and fast moves all do this, and
+options are convex enough to make it routine rather than exceptional. A -50% stop
+does not cap your loss at 50%; it caps the loss at "whatever the contract is worth the
+next time we look". Size positions on the assumption that a stop can be missed, which
+is exactly why the premium caps in the table above exist alongside the stop.
 
 ---
 
