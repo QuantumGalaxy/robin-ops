@@ -14,48 +14,56 @@ from dataclasses import dataclass
 from datetime import date
 
 from ..config import EntryConfig
-from ..greeks import CONTRACT_MULTIPLIER
+from ..greeks import bs_price, years_to_expiry
 from ..models import Candidate, OptionQuote
 from .signals import Direction
 
 
 def required_underlying_move(
-    quote: OptionQuote, target_return: float, horizon_days: float
+    quote: OptionQuote,
+    target_return: float,
+    horizon_days: float,
+    dte: int,
+    risk_free_rate: float = 0.042,
 ) -> float:
     """Percentage move in the underlying needed to gain ``target_return`` on premium.
 
-    Uses a delta-gamma-theta expansion rather than delta alone, because over a
-    two-week horizon decay is a first-order term, not a rounding error:
+    Reprices the contract in full at the end of the holding period and solves for
+    the underlying price that gets it to the target, rather than extrapolating
+    from delta, gamma, and theta. The Taylor expansion is badly wrong here: over
+    a two-week horizon on a short-dated contract the Greeks themselves move so
+    much that the approximation can be off by a factor of two or more.
 
-        target * P = |delta| * x + 0.5 * gamma * x^2 + theta_per_share * days
-
-    solved for ``x``, the favourable move in dollars. Returns ``inf`` when decay
-    alone eats more than the target over the horizon, meaning the contract can
-    never reach +10% no matter which way the stock goes.
+    Volatility is held constant, so this measures the *directional* move needed
+    and deliberately says nothing about IV expanding or collapsing. Returns
+    ``inf`` when no plausible move gets there before decay does.
     """
     g = quote.greeks
-    if g is None or quote.underlying_price <= 0 or g.price <= 0:
+    S = quote.underlying_price
+    if g is None or S <= 0 or g.price <= 0 or g.iv <= 0:
         return math.inf
 
-    theta_per_share_total = (g.theta / CONTRACT_MULTIPLIER) * horizon_days
-    a = 0.5 * g.gamma
-    b = abs(g.delta)
-    c = theta_per_share_total - target_return * g.price
+    right = quote.contract.right
+    target_price = (1.0 + target_return) * g.price
+    # Time left on the contract once the holding period is over.
+    T_future = years_to_expiry(max(dte - horizon_days, 0.0))
 
-    if b <= 0:
+    def value_at(spot: float) -> float:
+        return bs_price(spot, quote.contract.strike, T_future, risk_free_rate, g.iv, 0.0, right)
+
+    # Search the favourable direction: up for calls, down for puts.
+    lo, hi = (S, S * 4.0) if right == "call" else (S * 0.05, S)
+    extreme = hi if right == "call" else lo
+    if value_at(extreme) < target_price:
         return math.inf
-    if a <= 1e-12:
-        x = -c / b
-    else:
-        disc = b * b - 4 * a * c
-        if disc < 0:
-            return math.inf
-        x = (-b + math.sqrt(disc)) / (2 * a)
-    if x <= 0:
-        # Already reachable with no move at all, which only happens on stale
-        # quotes. Treat as unreachable rather than trusting it.
-        return math.inf
-    return x / quote.underlying_price
+
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if (value_at(mid) < target_price) == (right == "call"):
+            lo = mid
+        else:
+            hi = mid
+    return abs(0.5 * (lo + hi) - S) / S
 
 
 def move_in_sigmas(quote: OptionQuote, move_pct: float, horizon_days: float) -> float:
@@ -146,7 +154,7 @@ class EntryScreener:
         if g.gamma * 0.01 * q.underlying_price > self.cfg.max_delta_change_per_1pct:
             return None
 
-        move_pct = required_underlying_move(q, self.target_return, self.horizon_days)
+        move_pct = required_underlying_move(q, self.target_return, self.horizon_days, dte)
         sigmas = move_in_sigmas(q, move_pct, self.horizon_days)
         if not math.isfinite(sigmas) or sigmas > self.max_required_sigma:
             return None

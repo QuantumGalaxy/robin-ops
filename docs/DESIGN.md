@@ -1,0 +1,382 @@
+# Design: a Robinhood options trading agent
+
+This document does three things: it states the rules you asked for, it works through
+which of them survive contact with how options actually price, and it describes the
+system that implements the result.
+
+I could not read your `robinhood_options_trading_agent_design.md` — it lives on your
+laptop and never reached this workspace. Everything below is written from your
+description of the rules. Paste the file in and I will diff it against this properly.
+
+---
+
+## 1. The rules as you stated them
+
+1. A fixed universe of 20 standard stocks.
+2. Buy options with roughly a two-week horizon.
+3. Sell at +10% on the position, or keep holding while it stays above +10%.
+4. If it never reaches +10%, hold to expiry.
+5. If it loses more than 50%, sell immediately — particularly with two or three days left.
+
+Rules 3 and 5 are the interesting ones, and rule 4 is the dangerous one.
+
+---
+
+## 2. The arithmetic problem, first
+
+Take a +10% profit target against a -50% stop. For the pair to break even:
+
+```
+p x 0.10 = (1 - p) x 0.50
+p = 0.50 / 0.60 = 0.833
+```
+
+**You need to win 83% of your trades just to break even**, before spreads and fees.
+Five winners pay for one loser, and no more. Run `optionsagent math` to see this
+against other target/stop pairs.
+
+Nothing about that is a detail to fix later. It is the whole strategy. A rule set that
+takes small profits and accepts large losses is only viable at a hit rate that
+essentially nobody sustains on directional option bets. This is the single change I
+would insist on before anything else runs with money in it.
+
+There are three ways out, and the design uses all three:
+
+- **Let winners run past the target.** +10% arms a trailing stop rather than
+  triggering a sale. Your own phrasing — "keep my options as long as I am in more
+  than 10% profit" — already describes this; it just needs to be the primary
+  behaviour rather than the alternative.
+- **Cut losers before -50%.** A -50% stop on a long option is barely a stop at all,
+  because by the time premium has halved the position usually needs an implausible
+  move to recover. Tightening it near expiry, and adding a decay-based exit, shrinks
+  the average loss.
+- **Pick contracts where +10% is a small move.** Covered in section 4.
+
+After those changes the realised distribution in simulation is a +27.9% average win
+against a -38.5% average loss at a 61.6% hit rate, which needs 58% to break even
+instead of 83%. Still demanding, but on the right side of possible.
+
+---
+
+## 3. The Greeks, and why each one is in the code
+
+You said you were not sure what these are, so here is the working version. There is
+no Greek called alpha — alpha is a portfolio term for return above a benchmark, an
+outcome rather than an input. The four that matter:
+
+| Greek | What it is | Why the agent filters on it |
+| --- | --- | --- |
+| **Delta** | How much the option moves per $1 move in the stock. 0.60 delta gains about 60 cents per dollar. Also roughly the chance of finishing in the money. | Determines how big a stock move your +10% target requires. This is the most important filter in the system. |
+| **Gamma** | How fast delta itself changes. | Convexity is why a losing option can go from -20% to -60% between two polls. It explodes near expiry, which is why the agent refuses to hold into expiry week. |
+| **Theta** | Dollars lost per day purely to time passing. Accelerates as expiry approaches. | Sets the clock you are trading against. It is the direct reason to buy 30-45 days out rather than 14. |
+| **Vega** | Dollars gained per one point of implied volatility. | Buying an option is buying volatility whether you meant to or not. Buy it cheap, and never hold it through an earnings report. |
+
+Concretely, on a $200 stock with 35% implied vol, a 0.30-delta 14-day call costs $2.56
+and decays $17.78 per day — **7% of the contract's value every day**. To be up 10% two
+days later the stock has to first cover 14% of decay. That contract is not a directional
+bet over two weeks, it is a bet on an immediate, large move.
+
+`optionsagent greeks --spot 200 --strike 210 --dte 14 --iv 0.35` prints these for any
+contract you want to reason about.
+
+---
+
+## 4. Making +10% a reachable target
+
+This is where most of the leverage in the design sits, and it is the part your rules
+did not address at all.
+
+Ten percent of premium is not a fixed amount of stock movement. It depends entirely on
+which contract you buy. For every candidate the screener reprices the contract at the
+end of the holding period and solves for the underlying price that gets it to +10%,
+then divides that move by the move the market is already pricing over the same period
+to get a **sigma requirement**.
+
+On a $200 stock at 30-35% implied vol, holding two weeks:
+
+| Contract | Price | Theta | Move needed for +10% | In sigmas |
+| --- | --- | --- | --- | --- |
+| 0.73-delta, 40 DTE | $14.33 | 0.7%/day | 1.81% | 0.31 |
+| 0.54-delta, 40 DTE | $8.37 | 1.3%/day | 2.17% | 0.37 |
+| 0.30-delta, 14 DTE | $2.56 | 7.0%/day | 5.41% | 0.79 |
+| 0.13-delta, 10 DTE | $0.63 | 17.0%/day | 6.35% | 1.08 |
+
+Same +10% rule, three times the required move between the top row and the bottom. The
+cheap contracts look attractive because a small move is a large *percentage* gain, but
+they have to overcome their own decay first, and the decay is enormous. The agent
+rejects anything needing more than 1.25 sigma, which quietly does more work than every
+other filter combined.
+
+`optionsagent chain NVDA` shows this calculation for a live chain. It is a full
+Black-Scholes reprice rather than a delta-gamma-theta approximation, because over a
+two-week horizon the Greeks themselves move enough that the approximation is off by a
+factor of two on exactly the short-dated contracts you most need to judge correctly.
+
+The corollary is that **buying 14-DTE contracts is the wrong way to get a two-week
+holding period**. Theta scales roughly with `1/sqrt(T)`, so the last two weeks are the
+most expensive fortnight in the contract's life. Buy 30-45 DTE and exit after 14 days:
+same directional window, materially less decay, and you never touch the gamma spike
+near expiry.
+
+---
+
+## 5. The other thing that eats a 10% target: the spread
+
+If a contract is bid $1.90 / ask $2.10, the mid is $2.00 and the spread is 10% of mid.
+Buy at the ask and sell at the bid and you have lost 10% without the stock moving at
+all. **Your profit target and your transaction cost are the same size.**
+
+So:
+
+- positions are marked at the **mid**, never at last trade (which is routinely stale
+  and outside the current spread, and would fire your exits on phantom moves);
+- contracts with a spread above 6% of mid are rejected outright;
+- orders are **always limit orders**, starting near the mid and working up the spread
+  over a few repricing attempts rather than crossing immediately;
+- urgent exits (stop-loss, expiry guard) are the deliberate exception: they cross to
+  the bid, because getting out matters more than two cents.
+
+Robinhood charges no options commission, but regulatory fees still apply at roughly
+$0.06 per contract per side. That is noise next to the spread.
+
+---
+
+## 6. Rule 4 is the one to delete
+
+> "If you don't see 10% profit, wait till the expiry date."
+
+This is the most expensive rule in the set. Holding a long option to expiry means
+holding through the period of maximum decay and maximum gamma, and the terminal
+outcome for an out-of-the-money contract is a total loss. Your -50% stop does not
+protect you either, because in the final days an option can gap from -40% to -100%
+between two polls of a one-minute loop.
+
+Replace it with three exits that all fire well before expiry:
+
+- **Expiry guard**: close everything at 3 DTE regardless of P&L.
+- **Near-expiry stop**: tighten from -50% to -30% inside the final week.
+- **Decay stop**: if the contract is bleeding more than 4%/day and is not yet working,
+  the remaining premium is better redeployed.
+
+Your instinct in the last sentence of the brief — sell a big loser when there are only
+two or three days left — is exactly right. The design just applies it earlier and
+unconditionally rather than only to positions already down 50%.
+
+---
+
+## 7. The uncomfortable part: none of this is an edge
+
+Your rules describe *exits*. Exits are risk management. They shape the distribution of
+outcomes; they do not create a positive one.
+
+Every long option starts underwater in two ways. Implied volatility has historically
+run about 10-15% above subsequently realised volatility, because option sellers demand
+payment for carrying tail risk — so on average you overpay for the contract. And you
+pay the spread twice. Buying calls and puts with no view is reliably negative
+expectancy, and no exit rule fixes that.
+
+So something must decide **which direction to buy and whether to buy at all**. In this
+implementation that lives in exactly one file, `strategy/signals.py`, deliberately
+isolated so it can be replaced without touching anything else. The default is a plain
+trend filter: it requires price on the correct side of a 30-day average *and* a
+10-day move large enough relative to that symbol's own noise, otherwise it stands
+aside. It is honest and hard to overfit. It is not a demonstrated edge, and I would not
+claim otherwise.
+
+**This is the part of the system worth your attention.** The rest is plumbing that can
+be verified. Treat the signal as a slot to fill with something you can defend out of
+sample. If you cannot find one, the correct conclusion is not to trade this strategy —
+and the simulator's Kelly output will tell you so by returning zero.
+
+---
+
+## 8. What the simulation says
+
+`optionsagent simulate` runs the real engine — same screener, same exits, same fill
+model — across many independent synthetic markets, and compares your rules as stated
+(`config/brief.yaml`) against the recommended set (`config/recommended.yaml`).
+
+Three modelling choices make this a real test rather than a flattering one:
+
+- **Implied vol is set 12% above realised vol**, so buying premium starts negative-EV
+  the way it does in practice. Set that ratio to 1.0 and almost any option-buying
+  strategy looks brilliant, which is how backtests lie.
+- **The agent polls four times a day, not once.** With one look per day a +10% target
+  "fills" at +50% because the mark gapped straight past it overnight. That single
+  detail was inflating the take-profit results by roughly 2x before it was fixed.
+- **Fills are not at the mid.** Orders concede part of the spread in both directions
+  and sometimes miss entirely.
+
+Output over 40 markets x 250 days (raw data in `simulation-results.json`):
+
+| Metric | Recommended | Your rules as stated |
+| --- | --- | --- |
+| Win rate | 61.6% | 70.2% |
+| Break-even win rate needed | 83.3% | 83.3% |
+| Average win | +27.9% | +27.2% |
+| Average loss | -38.5% | -60.5% |
+| Profit factor | 1.14 | 1.04 |
+| Median account return | +10.2% | +7.3% |
+| 5th percentile outcome | -22.4% | **-84.8%** |
+| Average max drawdown | -20.3% | -66.2% |
+
+The pattern is the point, not the digits. Your rules produce the *higher* win rate —
+taking profits at +10% wins often, exactly as intended — and still barely clear
+break-even, because the average loss is more than twice the average win. Plug the
+realised numbers back into the same formula: `60.5 / (27.2 + 60.5) = 69%` break-even
+against a 70.2% actual hit rate. The entire margin is one percentage point of win rate.
+
+The recommended set wins less often and makes more, because the trailing stop lets
+winners past +10% while the tighter near-expiry stop keeps losses to -38.5%. Its
+break-even requirement drops to `38.5 / (27.9 + 38.5) = 58%` against a 61.6% hit rate —
+a thinner strategy on paper, with a genuine buffer instead of a rounding error.
+
+The drawdown column is the part I would not ignore. A 5th-percentile outcome of -85%
+is not a bad quarter, it is the account gone, and it comes from holding to expiry
+combined with sizing that puts 60% of equity into premium.
+
+**Read the absolute returns with real suspicion.** The synthetic market has a positive
+drift and no macro regimes, so both columns look better than they would in reality.
+The comparison between columns is meaningful; the levels are not a forecast.
+
+---
+
+## 9. Architecture
+
+```
+CLI (typer)
+  |
+  +-- TradingEngine .................. the loop
+        |
+        +-- MarketDataProvider ....... synthetic | robinhood
+        +-- Broker ................... paper | robinhood
+        +-- Portfolio ................ ledger, JSON state, trade log
+        +-- RiskManager .............. limits, PDT, kill switch
+        +-- Strategy
+              +-- MomentumSignal ..... direction (the replaceable part)
+              +-- EntryScreener ...... which contract
+              +-- size_position ...... how many
+              +-- evaluate_exit ...... when to get out
+```
+
+Each loop, in this order and never another:
+
+1. refresh equity, register the session with the risk manager;
+2. settle any expired contracts at intrinsic;
+3. reconcile against the broker's actual positions;
+4. **evaluate exits on everything held**;
+5. scan for entries, if risk limits allow.
+
+Exits run before entries so that a stall or an exception while scanning chains can
+never delay closing a loser. Risk checks can block an entry; nothing can block an exit.
+
+Two accounting details that are easy to get wrong and matter more than they look.
+Expired contracts are settled at intrinsic *before* reconciliation, and positions that
+vanish from the broker are booked as closed trades rather than silently dropped —
+otherwise every trade you closed by hand in the app disappears from the log and your
+recorded win rate quietly inflates. Position state is written to disk after every
+change, so a restart resumes with trailing stops and high-water marks intact instead of
+resetting every position's peak to zero.
+
+---
+
+## 10. Risk controls
+
+| Control | Default | Why |
+| --- | --- | --- |
+| Risk per trade | 2% of equity | With a -50% stop this is 4% of equity in premium per position. |
+| Max positions | 6, one per underlying | Concentration limit. |
+| Max premium deployed | 25% of equity | A full book stopping out together costs ~12%. |
+| Daily loss limit | 5% | Halts new entries for the session. |
+| Drawdown halt | 20% | Stops the agent pending human review. |
+| Consecutive losses | 5 | Usually means the signal has stopped working. |
+| PDT protection | on below $25k | See below. |
+| Kill switch | `touch state/KILL` | Blocks entries from any shell, no restart. |
+
+**Pattern day trader rule.** Below $25,000 in equity, FINRA allows three day trades per
+rolling five business days. A +10% target on a liquid option is routinely hit the same
+session, so without protection the agent spends its day trades taking small profits and
+then cannot cut a loser on the day it needs to. It reserves the last one for stop-losses.
+
+**Position sizing is a real constraint on a small account.** At 2% risk per trade with a
+-50% stop, a $25k account can commit about $1,000 of premium per position. A 0.60-delta
+contract on a $500 stock costs $2,000+, so most of a mega-cap universe is simply
+unaffordable. The engine walks down the ranked candidate list to find something that
+fits, but you should know the constraint is binding. Your options are to accept a
+narrower effective universe, raise risk per trade (and accept the drawdown), or use
+vertical spreads to cut per-position cost — the last being the genuinely correct answer,
+and the most natural next feature.
+
+---
+
+## 11. Robinhood specifically
+
+Worth being blunt about, because it constrains everything above.
+
+- **There is no supported retail options API.** `robin_stocks` drives the private
+  endpoints the mobile app uses. It is a grey area under their terms, and the endpoints
+  change without notice. Account restriction is a real, if uncommon, risk.
+- **Quotes are snapshots, not a stream.** Polling 20 underlyings plus open positions
+  takes real time and will hit rate limits if pushed. The 60-second default loop is
+  deliberately conservative, and it means you are not reacting intraday to a fast move.
+- **Greeks from the endpoint are unreliable.** Often null or stale. The agent ignores
+  them and recomputes from the mid price, which also keeps paper and live numerically
+  identical.
+- **Auth requires MFA.** Use a TOTP secret, or the agent cannot re-authenticate
+  unattended.
+- **You need options approval level 2** for long calls and puts.
+
+If you want this running unattended against real money, a broker with a documented
+options API is a materially better foundation. The adapter boundary is deliberately
+narrow — one data class and one broker class — so switching is a contained change
+rather than a rewrite.
+
+---
+
+## 12. Verdict on your design
+
+**Good:**
+
+- A fixed, liquid universe. Exactly right, and more important than it sounds: liquidity
+  is what makes a 10% target reachable at all.
+- Mechanical exits defined in advance. This is the part most people skip.
+- A defined holding period. Prevents the classic slow bleed into expiry.
+- "Keep it while I am up more than 10%." This instinct is correct and is what the
+  trailing stop implements.
+- Cutting a big loser when only days remain. Also correct.
+
+**Needs to change:**
+
+| Your rule | Change | Why |
+| --- | --- | --- |
+| Sell at +10% | Arm a trailing stop at +10% with a floor there | +10%/-50% needs an 83% win rate; capping winners guarantees you never clear it |
+| Two-week contracts | Buy 30-45 DTE, exit after 14 days | Same window, much less decay, no gamma spike |
+| Hold to expiry if flat | Expiry guard at 3 DTE, plus a decay stop | Holding to expiry is where total losses come from |
+| -50% stop | Keep it, but tighten to -30% near expiry | -50% on a long option is barely a stop |
+| (not specified) | Delta 0.45-0.70 and a sigma-requirement filter | Determines whether +10% is a normal fluctuation or an outlier |
+| (not specified) | Spread cap, mid-price marking, limit orders | Otherwise costs are the same size as the target |
+| (not specified) | IV rank cap and earnings avoidance | IV crush loses money on directionally correct trades |
+| (not specified) | Sizing from the stop, portfolio caps, PDT protection | Turns a rule set into something that survives a bad month |
+| (not specified) | **An explicit directional signal** | Exits are not an edge; something has to decide what to buy |
+
+**The gap that matters most** is the last one. Your design specifies when to get out in
+some detail and does not specify what to buy or why. That is backwards relative to where
+the money is: exits shape the distribution, entries determine whether it has a positive
+mean at all.
+
+---
+
+## 13. How to proceed
+
+1. `optionsagent math` and `optionsagent explain` — the arithmetic and the Greeks.
+2. `optionsagent simulate --config config/recommended.yaml --compare config/brief.yaml`
+   — see the two rule sets side by side, and change the parameters you disagree with.
+3. `optionsagent run --loops 50 --advance-days 1` — watch the agent trade on paper.
+4. Replace `MomentumSignal` with something you can defend out of sample. Nothing before
+   this step is worth risking money on.
+5. Only then connect Robinhood, leave `dry_run` on, and compare the orders it *would*
+   have sent against what you would have done yourself for a full options cycle.
+6. Go live at the smallest size that is not a rounding error, with the kill switch
+   within reach.
+
+Steps 1 through 3 work today. Step 4 is the actual project.

@@ -40,18 +40,29 @@ def screener(**overrides) -> EntryScreener:
 
 
 def test_in_the_money_needs_a_smaller_move_than_out_of_the_money():
-    itm = required_underlying_move(build_quote(strike=185.0), 0.10, 14.0)
-    otm = required_underlying_move(build_quote(strike=225.0), 0.10, 14.0)
+    itm = required_underlying_move(build_quote(strike=185.0), 0.10, 14.0, 35)
+    otm = required_underlying_move(build_quote(strike=225.0), 0.10, 14.0, 35)
     assert itm < otm
 
 
-def test_required_move_is_infinite_when_decay_eats_the_target():
-    # A far out-of-the-money contract days from expiry cannot reach +10% on any
-    # move that delta and gamma can deliver before theta takes it away.
-    q = build_quote(strike=260.0, dte=3, iv=0.25)
-    assert math.isinf(required_underlying_move(q, 0.10, 14.0)) or required_underlying_move(
-        q, 0.10, 14.0
-    ) > 0.5
+def test_short_dated_contracts_need_a_bigger_move_for_the_same_target():
+    # Decay has to be overcome before delta can deliver the gain, so a two-week
+    # contract asks far more of the stock than a six-week one.
+    far = required_underlying_move(build_quote(strike=200.0, dte=40), 0.10, 14.0, 40)
+    near = required_underlying_move(build_quote(strike=208.0, dte=14, iv=0.35), 0.10, 14.0, 14)
+    assert near > far * 2
+
+
+def test_required_move_is_infinite_when_the_target_is_unreachable():
+    # A far out-of-the-money contract held past its own expiry cannot get there.
+    q = build_quote(strike=400.0, dte=3, iv=0.25)
+    assert math.isinf(required_underlying_move(q, 0.10, 14.0, 3))
+
+
+def test_puts_require_a_downward_move():
+    q = build_quote(strike=205.0, right="put")
+    move = required_underlying_move(q, 0.10, 14.0, 35)
+    assert 0.0 < move < 0.5
 
 
 def test_move_in_sigmas_scales_with_volatility():

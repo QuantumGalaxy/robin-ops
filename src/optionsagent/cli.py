@@ -219,14 +219,13 @@ def chain(
     t.add_column("Mid", justify="right")
     t.add_column("Spread", justify="right")
     t.add_column("Delta", justify="right")
-    t.add_column("Theta/day", justify="right")
+    t.add_column("Theta/d", justify="right")
     t.add_column("IV", justify="right")
     t.add_column(f"Move for +{cfg.exit.take_profit_pct:.0%}", justify="right")
     t.add_column("Sigmas", justify="right")
-    t.add_column("Score", justify="right")
     for c in cands[:limit]:
         move = required_underlying_move(
-            c.quote, cfg.exit.take_profit_pct, float(cfg.exit.max_hold_days)
+            c.quote, cfg.exit.take_profit_pct, float(cfg.exit.max_hold_days), c.dte
         )
         sig = move_in_sigmas(c.quote, move, float(cfg.exit.max_hold_days))
         t.add_row(
@@ -239,7 +238,6 @@ def chain(
             f"{c.iv:.0%}",
             f"{move:.2%}",
             f"{sig:.2f}",
-            f"{c.score:.3f}",
         )
     console.print(t)
     console.print(

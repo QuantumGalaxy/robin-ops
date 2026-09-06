@@ -12,7 +12,8 @@ mode until you explicitly turn it off.
 > **This is not financial advice, and the strategy is not proven profitable.**
 > Long options can and regularly do lose 100% of the premium paid. Read
 > [`docs/DESIGN.md`](docs/DESIGN.md) before risking money — in particular the section
-> on why a +10% / -50% rule pair needs an 83% win rate just to break even.
+> on why a +10% / -50% rule pair needs an 83% win rate just to break even, and the one
+> on why exit rules are not an edge.
 
 ## Quick start
 
@@ -65,6 +66,7 @@ in `config/recommended.yaml`, evaluated most-protective-first.
 | `src/optionsagent/marketdata/` | Synthetic and Robinhood data providers |
 | `src/optionsagent/brokers/` | Paper and Robinhood order routing |
 | `config/` | `recommended.yaml` and `brief.yaml` for head-to-head runs |
+| `docs/DESIGN.md` | The design rationale, and what to change before trading it |
 
 ## Connecting Robinhood
 
