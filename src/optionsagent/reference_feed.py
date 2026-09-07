@@ -67,11 +67,14 @@ class IVArchive:
             )
 
     def rank(self, symbol, as_of, current_iv=None):
+        cal = calendar()
+        end = cal.date_to_session(as_of.isoformat(), direction="previous")
+        start = cal.session_offset(end, -251).date().isoformat()
         with closing(sqlite3.connect(self.path)) as db, db:
             values = db.execute(
-                "SELECT day,iv,source FROM iv WHERE symbol=? AND day<=? "
+                "SELECT day,iv,source FROM iv WHERE symbol=? AND day>=? AND day<=? "
                 "ORDER BY day DESC LIMIT 252",
-                (symbol, as_of.isoformat()),
+                (symbol, start, as_of.isoformat()),
             ).fetchall()
         if len(values) < 200 or date.fromisoformat(values[0][0]) != as_of:
             return None, len(values)

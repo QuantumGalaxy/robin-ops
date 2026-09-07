@@ -783,6 +783,32 @@ def iv_import(path: Path, config: ConfigOpt = None):
     console.print(f"Imported {count} daily IV observations; no trading settings changed.")
 
 
+@app.command("iv-history-import")
+def iv_history_import(path: Path, config: ConfigOpt = None):
+    """Import DoltHub CSV/XLSX into research storage without enabling trading filters."""
+    from .iv_history import import_history
+    from .runtime import RuntimeStore
+
+    cfg = _load(config)
+    try:
+        report = import_history(path, cfg.state_dir, cfg.universe.symbols)
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+    RuntimeStore(cfg.state_dir).event("iv_history_import", {
+        **report, "message": "IV research imported; execution filter unchanged",
+    })
+    console.print_json(data=report)
+
+
+@app.command("iv-history-status")
+def iv_history_status(config: ConfigOpt = None):
+    """Show sourced history coverage, missing sessions, and freshness."""
+    from .iv_history import history_status
+
+    cfg = _load(config)
+    console.print_json(data=history_status(cfg.state_dir, cfg.universe.symbols))
+
+
 @app.command("web-dashboard")
 def web_dashboard(config: ConfigOpt = None, port: int = 8766, no_browser: bool = False):
     """Serve the private browser dashboard on this Mac only."""

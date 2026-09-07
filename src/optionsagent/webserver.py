@@ -16,6 +16,8 @@ from .runtime import RuntimeStore
 
 
 def state(config):
+    from .iv_history import history_status
+
     store = RuntimeStore(config.state_dir)
     snapshot = store.read()
     alerts = Alerts(config.state_dir)
@@ -61,7 +63,8 @@ def state(config):
                 )
                 and r.earnings_checked
                 and len(r.daily_closes) >= 30
-                for r in ref.symbols.values()
+                for symbol, r in ref.symbols.items()
+                if symbol in config.universe.symbols
             )
             reference = (
                 f"{ready}/{len(config.universe.symbols)} ready"
@@ -80,6 +83,7 @@ def state(config):
         "events": events,
         "curve": curve,
         "reference": reference,
+        "iv_history": history_status(config.state_dir, config.universe.symbols),
         "entry_block": latest_block,
     }
 

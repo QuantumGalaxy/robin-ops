@@ -41,7 +41,7 @@ DEFAULT_UNIVERSE: list[str] = [
     "AMD",
     "NFLX",
     "CRM",
-    "QQQ",
+    "MA",
     "SPY",
 ]
 
