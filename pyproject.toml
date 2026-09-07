@@ -5,6 +5,7 @@ description = "Rule-based options trading agent for Robinhood with Greeks-aware 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "certifi>=2024.2.2",
     "numpy>=1.26",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
@@ -15,6 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+oauth = ["keyring>=25"]
 robinhood = ["robin-stocks>=3.1.0", "pyotp>=2.9.0"]
 dev = ["pytest>=8.2", "ruff>=0.5"]
 

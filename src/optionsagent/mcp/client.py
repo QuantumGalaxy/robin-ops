@@ -4,13 +4,9 @@ Only what this agent needs: ``initialize``, ``tools/list``, and ``tools/call`` o
 streamable HTTP with a bearer token. Written against the standard library so the
 package does not grow a transport dependency.
 
-**Getting a token.** The server authenticates with OAuth 2.1 + PKCE, and the
-authorisation step has to happen in a desktop browser where you approve access in
-the Robinhood app. That interactive flow is deliberately out of scope here: run it
-once through an MCP host (Claude, Cursor, Codex) or an OAuth helper, then hand the
-resulting access token to this client via ``ROBINHOOD_MCP_TOKEN``. Tokens expire,
-and a 401 surfaces as :class:`McpAuthError` so the caller can prompt for a fresh one
-rather than silently trading on a dead session.
+Run ``optionsagent auth-login`` to authenticate robin-ops directly. Its own
+credentials live in the native OS keyring and refresh before expiry. An explicit
+ROBINHOOD_MCP_TOKEN remains supported for external credential managers.
 """
 
 from __future__ import annotations
@@ -18,10 +14,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
+
+import certifi
+
+
+def open_mcp(request, *, timeout, context):
+    from .oauth import NoRedirect
+
+    opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
+    return opener.open(request, timeout=timeout)
+
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +66,7 @@ class HttpToolCaller:
     timeout: float = 30.0
     client_name: str = "optionsagent"
     client_version: str = "0.1.0"
+    _use_keyring: bool = field(default=False, init=False)
     _session_id: str | None = field(default=None, init=False)
     _next_id: int = field(default=0, init=False)
     _initialized: bool = field(default=False, init=False)
@@ -66,15 +74,25 @@ class HttpToolCaller:
 
     def __post_init__(self) -> None:
         self.token = self.token or os.environ.get("ROBINHOOD_MCP_TOKEN")
-        if not self.token:
-            raise McpAuthError(
-                "No MCP token. Authorise the Robinhood Trading MCP once in a desktop "
-                "browser, then set ROBINHOOD_MCP_TOKEN to the resulting access token."
-            )
+        if self.url != ROBINHOOD_MCP_URL:
+            raise McpAuthError("This client only sends credentials to the official Robinhood MCP")
+        self._use_keyring = not bool(self.token)
+        if self._use_keyring:
+            self._load_token()
+
+    def _load_token(self):
+        from .oauth import AuthError, access_token
+
+        try:
+            self.token = access_token()
+        except AuthError as exc:
+            raise McpAuthError(str(exc)) from None
 
     # ---- transport -------------------------------------------------------
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if self._use_keyring:
+            self._load_token()
         body = json.dumps(payload).encode()
         headers = {
             "Content-Type": "application/json",
@@ -89,7 +107,11 @@ class HttpToolCaller:
 
         req = urllib.request.Request(self.url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with open_mcp(
+                req,
+                timeout=self.timeout,
+                context=ssl.create_default_context(cafile=certifi.where()),
+            ) as resp:
                 session = resp.headers.get("Mcp-Session-Id")
                 if session:
                     self._session_id = session
@@ -103,7 +125,7 @@ class HttpToolCaller:
             if exc.code in (401, 403):
                 raise McpAuthError(
                     f"Robinhood MCP rejected the token ({exc.code}). Re-authorise and "
-                    "set a fresh ROBINHOOD_MCP_TOKEN."
+                    "run optionsagent auth-login again (or renew your explicit token)."
                 ) from exc
             if exc.code == 404:
                 self._initialized = False

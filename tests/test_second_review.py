@@ -185,12 +185,12 @@ def test_http_checks_response_id_and_sends_negotiated_version(monkeypatch):
     c = HttpToolCaller(token="test")
     c._protocol_version = "2025-06-18"
 
-    def open_request(req, timeout):
+    def open_request(req, timeout, **kwargs):
         assert req.get_header("Mcp-protocol-version") == "2025-06-18"
         response = io.BytesIO(json.dumps({"id": 99, "result": {}}).encode())
         response.headers = {"Content-Type": "application/json"}
         return response
 
-    monkeypatch.setattr("urllib.request.urlopen", open_request)
+    monkeypatch.setattr("optionsagent.mcp.client.open_mcp", open_request)
     with pytest.raises(McpError, match="ID does not match"):
         c._request("tools/list")

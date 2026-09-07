@@ -616,8 +616,8 @@ def mcp_probe(
     starts parsing oddly: a missing tool usually means options approval is still
     pending rather than that the code is broken.
 
-    Requires ROBINHOOD_MCP_TOKEN. Authorise once in a desktop browser through an
-    MCP host, then export the access token.
+    Run optionsagent auth-login first. Uses this application's own OS-keyring
+    credential, or an explicitly supplied ROBINHOOD_MCP_TOKEN.
     """
     from .mcp.client import HttpToolCaller, McpError
     from .mcp.robinhood import REQUIRED_TOOLS
@@ -665,3 +665,54 @@ def mcp_probe(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("auth-login")
+def auth_login(no_browser: bool = typer.Option(False, "--no-browser")):
+    """Connect robin-ops directly to Robinhood using its own OAuth client."""
+    from .mcp.oauth import AuthError, login
+
+    try:
+        login(open_browser=not no_browser, announce=typer.echo)
+    except AuthError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+
+
+@app.command("auth-status")
+def auth_status():
+    """Check local login metadata without displaying credentials or fetching accounts."""
+    import time
+
+    from .mcp.oauth import AuthError, CredentialStore
+
+    try:
+        saved = CredentialStore().read()
+        if not saved.get("access_token"):
+            typer.echo("Not signed in. Run optionsagent auth-login.")
+        else:
+            state = "valid" if saved.get("expires_at", 0) > time.time() else "expired"
+            typer.echo(
+                f"robin-ops credential: {state}; refresh available: "
+                f"{bool(saved.get('refresh_token'))}. Live trading disabled."
+            )
+    except AuthError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+
+
+@app.command("auth-logout")
+def auth_logout():
+    """Delete this application's local credentials; revoke provider access separately."""
+    from .mcp.oauth import AuthError, CredentialStore, credential_lock
+
+    try:
+        with credential_lock():
+            CredentialStore().clear()
+        typer.echo(
+            "Local robin-ops credentials removed. To revoke the grant, use Robinhood "
+            "Security & Privacy settings."
+        )
+    except AuthError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None

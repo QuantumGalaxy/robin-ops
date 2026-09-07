@@ -46,7 +46,10 @@ and `--live` refuse startup. Market data is selected independently using
 `data_provider: synthetic` or `robinhood_mcp`.
 
 For paper trading against MCP quotes, set `data_provider: robinhood_mcp`, keep
-`broker.kind: paper`, and supply `ROBINHOOD_MCP_TOKEN` through your environment.
+`broker.kind: paper`, and connect with `optionsagent auth-login` after installing
+`pip install -e ".[oauth]"`.
+Credentials are stored in the native OS keyring and refreshed before expiry.
+See [standalone sign-in](docs/STANDALONE-AUTH.md).
 Use `optionsagent mcp-probe` for read-only schema discovery. Do not commit tokens.
 The provider requires timestamped quotes and a current sourced reference-data
 snapshot for daily closes, historical ATM IV rank, earnings and exchange sessions.
