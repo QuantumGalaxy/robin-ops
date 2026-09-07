@@ -140,3 +140,23 @@ def test_sizing_refuses_when_one_contract_is_too_expensive():
     cfg = SizingConfig(risk_per_trade_pct=0.02)
     d = size_position(q, equity=10_000, buying_power=10_000, open_premium=0, cfg=cfg)
     assert d.contracts == 0
+
+
+def test_paper_profile_omits_rank_without_inventing_history():
+    q = build_quote()
+    assert screener().screen([q], "call", as_of=TODAY, iv_rank=None) == []
+    test = screener(require_iv_rank=False)
+    accepted = test.screen([q], "call", as_of=TODAY, iv_rank=None)
+    assert len(accepted) == 1 and accepted[0].iv_rank is None
+    assert any("excluded for paper test" in r for r in accepted[0].reasons)
+    assert test.screen([build_quote(oi=10)], "call", as_of=TODAY) == []
+    assert test.screen([build_quote(spread_pct=0.25)], "call", as_of=TODAY) == []
+    assert test.screen([q], "call", as_of=TODAY, days_to_earnings=1) == []
+    assert test.screen([q], "none", as_of=TODAY) == []
+
+
+def test_rank_bypass_is_paper_only():
+    from optionsagent.config import Config
+
+    with pytest.raises(ValueError, match="only for paper"):
+        Config(mode="live_auto", entry=EntryConfig(require_iv_rank=False))

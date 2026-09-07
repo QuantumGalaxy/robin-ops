@@ -416,6 +416,7 @@ def run(
                         cfg.universe.symbols,
                         cfg.reference_data_file,
                         Path(cfg.state_dir) / "iv.sqlite3",
+                        require_iv_rank=cfg.entry.require_iv_rank,
                     )
                     if issues:
                         Alerts(cfg.state_dir).set("reference", "; ".join(issues))
@@ -761,7 +762,11 @@ def reference_refresh(config: ConfigOpt = None):
     cfg = _load(config)
     path = cfg.reference_data_file or str(Path(cfg.state_dir) / "reference.json")
     errors = refresh_reference(
-        HttpToolCaller(), cfg.universe.symbols, path, Path(cfg.state_dir) / "iv.sqlite3"
+        HttpToolCaller(),
+        cfg.universe.symbols,
+        path,
+        Path(cfg.state_dir) / "iv.sqlite3",
+        require_iv_rank=cfg.entry.require_iv_rank,
     )
     console.print(f"Reference snapshot saved to {path}")
     for error in errors:

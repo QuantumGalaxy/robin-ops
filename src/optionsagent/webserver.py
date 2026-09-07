@@ -25,6 +25,9 @@ def state(config):
         history = db.execute(
             "SELECT body FROM audit WHERE kind='loop' ORDER BY id DESC LIMIT 500"
         ).fetchall()
+    latest_block = ""
+    if history:
+        latest_block = json.loads(history[0][0]).get("blocked_reason", "")
     events = []
     for at, kind, raw in recent:
         data = json.loads(raw)
@@ -52,8 +55,10 @@ def state(config):
                 Path(config.reference_data_file).read_text()
             )
             ready = sum(
-                r.iv_rank is not None
-                and r.iv_history_days >= 200
+                (
+                    not config.entry.require_iv_rank
+                    or (r.iv_rank is not None and r.iv_history_days >= 200)
+                )
                 and r.earnings_checked
                 and len(r.daily_closes) >= 30
                 for r in ref.symbols.values()
@@ -75,6 +80,7 @@ def state(config):
         "events": events,
         "curve": curve,
         "reference": reference,
+        "entry_block": latest_block,
     }
 
 

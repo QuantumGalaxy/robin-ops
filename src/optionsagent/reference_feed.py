@@ -107,7 +107,7 @@ class IVArchive:
         return len(prepared)
 
 
-def refresh_reference(caller, symbols, path, iv_path, now=None):
+def refresh_reference(caller, symbols, path, iv_path, now=None, require_iv_rank=True):
     now = now or datetime.now(UTC)
     completed = last_completed(now)
     api = RobinhoodMcp(caller)
@@ -221,7 +221,7 @@ def refresh_reference(caller, symbols, path, iv_path, now=None):
                                 )
             rank, n = archive.rank(symbol, completed)
             entry.update(iv_rank=rank, iv_history_days=n)
-            if rank is None:
+            if rank is None and require_iv_rank:
                 errors.append(f"{symbol}: daily IV history not ready ({n}/200 minimum)")
         except Exception as exc:
             errors.append(f"{symbol}: reference refresh failed ({type(exc).__name__})")

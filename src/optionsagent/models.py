@@ -183,7 +183,7 @@ class Candidate:
     gamma: float
     vega: float
     iv: float
-    iv_rank: float
+    iv_rank: float | None
     dte: int
     reasons: list[str] = field(default_factory=list)
 

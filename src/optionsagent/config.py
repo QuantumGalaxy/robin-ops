@@ -95,6 +95,7 @@ class EntryConfig(StrictConfig):
     (``gamma * 0.01 * S``). Near expiry this number explodes, which is what makes
     a short-dated position swing faster than a polling loop can defend it."""
 
+    require_iv_rank: bool = True
     max_iv_rank: float = 0.75
     """Do not buy premium when implied vol is in the top quartile of its own
     52-week range; that is where IV crush does the most damage."""
@@ -281,6 +282,10 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def validate_safety(self) -> Config:
+        if not self.entry.require_iv_rank and (
+            self.mode != Mode.PAPER or self.broker.kind != "paper"
+        ):
+            raise ValueError("Disabling historical IV rank is permitted only for paper testing")
         for group in (
             self.entry,
             self.exit,

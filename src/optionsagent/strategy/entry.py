@@ -110,13 +110,15 @@ class EntryScreener:
             and 0 <= days_to_earnings <= self.cfg.avoid_earnings_within_days
         ):
             return []
-        if (
+        if self.cfg.require_iv_rank and (
             iv_rank is None
             or not math.isfinite(iv_rank)
             or not 0 <= iv_rank <= self.cfg.max_iv_rank
         ):
             return []
 
+        if not self.cfg.require_iv_rank:
+            iv_rank = None  # Explicitly excluded, never represented as observed history.
         out: list[Candidate] = []
         for q in quotes:
             cand = self._evaluate(q, direction, iv_rank, confidence, as_of)
@@ -129,7 +131,7 @@ class EntryScreener:
         self,
         q: OptionQuote,
         direction: Direction,
-        iv_rank: float,
+        iv_rank: float | None,
         confidence: float,
         as_of: date | None = None,
     ) -> Candidate | None:
@@ -180,7 +182,11 @@ class EntryScreener:
             f"theta {g.theta_pct_per_day:.2%}/day",
             f"spread {q.spread_pct:.2%}",
             f"needs {move_pct:.2%} move ({sigmas:.2f} sigma) for +{self.target_return:.0%}",
-            f"IV {g.iv:.1%} (rank {iv_rank:.0%})",
+            (
+                f"IV {g.iv:.1%} (rank {iv_rank:.0%})"
+                if iv_rank is not None
+                else f"IV {g.iv:.1%}; historical rank excluded for paper test"
+            ),
         ]
         return Candidate(
             quote=q,
@@ -195,12 +201,14 @@ class EntryScreener:
             reasons=reasons,
         )
 
-    def _score(self, q: OptionQuote, g, sigmas: float, iv_rank: float, confidence: float) -> float:
+    def _score(
+        self, q: OptionQuote, g, sigmas: float, iv_rank: float | None, confidence: float
+    ) -> float:
         """Rank survivors. Weights favour reachability and cost over everything else."""
         reachability = 1.0 / (1.0 + sigmas)
         cost = 1.0 - min(1.0, q.spread_pct / max(self.cfg.max_spread_pct, 1e-6))
         decay = 1.0 - min(1.0, g.theta_pct_per_day / max(self.cfg.max_theta_pct_per_day, 1e-6))
-        vol_value = 1.0 - min(1.0, max(0.0, iv_rank))
+        vol_value = 0.0 if iv_rank is None else 1.0 - min(1.0, max(0.0, iv_rank))
         delta_fit = 1.0 - min(
             1.0,
             abs(abs(g.delta) - 0.60) / max(self.cfg.max_abs_delta - self.cfg.min_abs_delta, 0.1),

@@ -129,3 +129,10 @@ The default is only ten requests per invocation. Choose a rate within your plan.
 After checking coverage, import it with `iv-import` and rebuild reference data. Do not import the one-day probe as a ready archive. The rank rejects mixed source definitions, and Robinhood's forward collector leaves external archives untouched. Continue refreshing Alpha Vantage history daily and importing it; this vendor download is manual, not an automatic background subscription. Live execution remains disabled.
 
 Documentation: https://www.alphavantage.co/documentation/#historical-options
+
+
+## Operational paper test without paid IV history
+
+`config/paper-robinhood.yaml` now explicitly sets `entry.require_iv_rank: false`, as requested. This is a different paper experiment: neither the historical-rank filter nor its ranking contribution is used. Current option IV/Greeks, DTE, ITM, delta, spread, liquidity, earnings, sizing and exit rules remain enforced. Default configurations still require IV history, and configuration validation prohibits this exception outside paper mode. The dashboard labels the exception and displays the most recent entry-block reason.
+
+Readiness check on September 7, 2026: 200 automated tests passed; Robinhood returned 90 completed daily closes and checked earnings for all 20 configured symbols. A real-data paper cycle started at $25,000, had no holdings or pending orders, and correctly blocked entries outside a verified session. September 7 is an XNYS holiday. Intraday order/exit behavior still requires market-hours paper observation; this check does not establish strategy profitability.
