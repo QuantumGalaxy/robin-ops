@@ -20,7 +20,7 @@ optionsagent run --config config/recommended.yaml --loops -1
 optionsagent web-dashboard --config config/recommended.yaml
 ```
 
-The dashboard opens a private `127.0.0.1` page with a random per-launch access token. Do not share its full link. It shows paper equity, cash, marked and realized P&L, holdings, exit thresholds, trades, entry blocks, pending orders, recent decisions, data readiness and alerts. Pause blocks new entries while monitoring existing holdings. Resume removes the manual pause; it does not clear reconciliation or risk halts. Closing the dashboard does not stop the runner.
+The dashboard opens a private `127.0.0.1` page with a random access key saved in an owner-only `dashboard-access.key` file under the configured state directory. The private link remains valid across dashboard restarts. The browser remembers access locally and establishes an HttpOnly, SameSite=Strict session cookie; restored tabs can recover using the private link. Do not share its full link. It shows paper equity, cash, marked and realized P&L, holdings, exit thresholds, trades, entry blocks, pending orders, recent decisions, data readiness and alerts. Pause blocks new entries while monitoring existing holdings. Resume removes the manual pause; it does not clear reconciliation or risk halts. Closing the dashboard does not stop the runner.
 
 ## Paper trading with Robinhood quotes
 
@@ -131,8 +131,8 @@ After checking coverage, import it with `iv-import` and rebuild reference data. 
 Documentation: https://www.alphavantage.co/documentation/#historical-options
 
 
-## Operational paper test without paid IV history
+## Paper experiment with DoltHub IV history
 
-`config/paper-robinhood.yaml` now explicitly sets `entry.require_iv_rank: false`, as requested. This is a different paper experiment: neither the historical-rank filter nor its ranking contribution is used. Current option IV/Greeks, DTE, ITM, delta, spread, liquidity, earnings, sizing and exit rules remain enforced. Default configurations still require IV history, and configuration validation prohibits this exception outside paper mode. The dashboard labels the exception and displays the most recent entry-block reason.
+The paper profile now enables `paper_iv_history_experiment: true` and `entry.require_iv_rank: true`. It uses the imported same-source daily history and automatically checks for the latest completed-day observation in the hourly reference worker. Missing or stale IV skips new entries; it does not stop exit monitoring. The source methodology remains unverified, so the dashboard labels the filter experimental and configuration blocks its use outside paper mode. See [IV import and filtering](iv-history.md) for validation rules and limitations.
 
-Readiness check on September 7, 2026: 200 automated tests passed; Robinhood returned 90 completed daily closes and checked earnings for all 20 configured symbols. A real-data paper cycle started at $25,000, had no holdings or pending orders, and correctly blocked entries outside a verified session. September 7 is an XNYS holiday. Intraday order/exit behavior still requires market-hours paper observation; this check does not establish strategy profitability.
+Observe entries, skips, simulated fills, exits, state recovery, and errors over multiple market sessions with the Mac awake and online. Keep the paper broker enabled. A week of observation does not establish profitability and does not enable live trading automatically.

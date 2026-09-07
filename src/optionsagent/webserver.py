@@ -1,12 +1,17 @@
-"""Loopback-only dashboard. Private per-launch token, no credential/broker endpoints."""
+"""Loopback-only dashboard with persistent private access and browser sessions."""
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
 import secrets
 import sqlite3
+import stat
 import threading
 import webbrowser
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
@@ -15,9 +20,43 @@ from .health import Alerts
 from .runtime import RuntimeStore
 
 
+def dashboard_token(state_dir):
+    """Keep restart/recovery links valid; credential stays local and owner-only."""
+    path = Path(state_dir) / "dashboard-access.key"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags, 0o600)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDONLY | flags)
+        with os.fdopen(fd) as f:
+            info = os.fstat(f.fileno())
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+                raise ValueError(
+                    "Dashboard access key must be a private file (permissions 0600)"
+                ) from None
+            value = f.read(256).strip()
+        if len(value) != 43 or any(
+            c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+            for c in value
+        ):
+            raise ValueError("Invalid dashboard access key; restore the private key file") from None
+        return value
+    with os.fdopen(fd, "w") as f:
+        value = secrets.token_urlsafe(32)
+        f.write(value + "\n")
+    return value
+
+
 def state(config):
     from .iv_history import history_status
 
+    iv_history = history_status(
+        config.state_dir,
+        config.universe.symbols,
+        experimental=config.paper_iv_history_experiment,
+    )
+    iv_ready = {r["symbol"] for r in iv_history["symbols"] if r.get("paper_rank") is not None}
     store = RuntimeStore(config.state_dir)
     snapshot = store.read()
     alerts = Alerts(config.state_dir)
@@ -38,6 +77,7 @@ def state(config):
             or data.get("blocked_reason")
             or data.get("message")
             or ", ".join(data.get("errors", []))
+            or "; ".join(data.get("skipped", [])[:3])
             or kind.replace("_", " ")
         )
         events.append({"at": at, "kind": kind, "message": str(message)[:500]})
@@ -58,8 +98,12 @@ def state(config):
             )
             ready = sum(
                 (
-                    not config.entry.require_iv_rank
-                    or (r.iv_rank is not None and r.iv_history_days >= 200)
+                    symbol in iv_ready
+                    if config.paper_iv_history_experiment
+                    else (
+                        not config.entry.require_iv_rank
+                        or (r.iv_rank is not None and r.iv_history_days >= 200)
+                    )
                 )
                 and r.earnings_checked
                 and len(r.daily_closes) >= 30
@@ -83,40 +127,65 @@ def state(config):
         "events": events,
         "curve": curve,
         "reference": reference,
-        "iv_history": history_status(config.state_dir, config.universe.symbols),
+        "iv_history": iv_history,
         "entry_block": latest_block,
     }
 
 
 def make_server(config, port=8766, token=None):
-    token = token or secrets.token_urlsafe(32)
+    token = token or dashboard_token(config.state_dir)
+    cookie_value = hmac.new(token.encode(), b"dashboard-session-v1", hashlib.sha256).hexdigest()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
-        def send(self, status, body, kind="application/json"):
+        def send(self, status, body, kind="application/json", session=False):
+            payload = body if isinstance(body, bytes) else json.dumps(body).encode()
             self.send_response(status)
             self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            if session:
+                self.send_header(
+                    "Set-Cookie",
+                    (
+                        f"robin_desk_{self.server.server_port}={cookie_value}; "
+                        "HttpOnly; SameSite=Strict; Path=/api/; Max-Age=604800"
+                    ),
+                )
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src "
                 "'self' 'unsafe-inline'; frame-ancestors 'none'",
             )
             self.end_headers()
-            self.wfile.write(body if isinstance(body, bytes) else json.dumps(body).encode())
+            self.wfile.write(payload)
 
-        def authorized(self):
+        def authorized(self, bearer_only=False):
             host = self.headers.get("Host", "")
             if host != f"127.0.0.1:{self.server.server_port}":
                 return False
             origin = self.headers.get("Origin")
             if origin and origin != f"http://127.0.0.1:{self.server.server_port}":
                 return False
-            return secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + token)
+            if secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + token):
+                return True
+            if bearer_only:
+                return False
+            # Cookie-only mutations require an exact browser Origin, not merely SameSite.
+            if self.command == "POST" and origin != f"http://127.0.0.1:{self.server.server_port}":
+                return False
+            if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                return False
+            try:
+                cookie = SimpleCookie(self.headers.get("Cookie", ""))
+                entry = cookie.get(f"robin_desk_{self.server.server_port}")
+                return bool(entry and secrets.compare_digest(entry.value, cookie_value))
+            except (CookieError, TypeError):
+                return False
 
         def do_GET(self):
             if self.path == "/":
@@ -138,6 +207,12 @@ def make_server(config, port=8766, token=None):
                 self.send(503, {"error": "State unavailable"})
 
         def do_POST(self):
+            if self.path == "/api/session":
+                if not self.authorized(bearer_only=True):
+                    self.send(403, {"error": "Access link required"})
+                    return
+                self.send(200, {"ok": True}, session=True)
+                return
             if not self.authorized():
                 self.send(403, {"error": "Unauthorized"})
                 return

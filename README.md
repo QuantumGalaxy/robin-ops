@@ -2,7 +2,7 @@
 
 ## Private dashboard and paper operations
 
-See [the paper MVP operating guide](docs/PAPER-MVP.md) for the local dashboard, standalone Robinhood data connection, automatic reference feeds, alerts, reviewed recovery, quote capture and replay. Real trading remains disabled; sufficient sourced IV history is still required before real-data paper entries.
+See [the paper MVP operating guide](docs/PAPER-MVP.md) for the local dashboard, standalone Robinhood data connection, automatic reference feeds, alerts, reviewed recovery, quote capture and replay. Real trading remains disabled. The paper profile uses an explicitly experimental DoltHub IV filter with automatic daily updates and freshness checks; see [IV history](docs/iv-history.md).
 
 Simulation-first options agent with a deterministic scanner, contract selector,
 risk controls, exit rules, durable account state, and a terminal dashboard.

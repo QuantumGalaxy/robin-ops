@@ -8,6 +8,7 @@ broker:
   starting_equity: 25000
 risk:
   kill_switch_file: state/robinhood-paper/KILL
-# Operational paper test; not the full historical-IV strategy.
+# Explicit paper experiment; source methodology is not verified for live trading.
+paper_iv_history_experiment: true
 entry:
-  require_iv_rank: false
+  require_iv_rank: true

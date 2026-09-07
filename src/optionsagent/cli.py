@@ -410,13 +410,35 @@ def run(
             # A separate connection keeps slow reference requests off the exit-monitor path.
             caller = HttpToolCaller()
             while not reference_stop.is_set():
+                if cfg.paper_iv_history_experiment:
+                    from .iv_history import refresh_latest
+
+                    try:
+                        update = refresh_latest(cfg.state_dir, cfg.universe.symbols)
+                        store.event(
+                            "iv_history_refresh",
+                            {
+                                **update,
+                                "message": "Paper IV daily refresh completed",
+                            },
+                        )
+                        Alerts(cfg.state_dir).clear("iv_download")
+                    except Exception as exc:
+                        # IV download failure must not prevent prices/earnings refresh or exits.
+                        Alerts(cfg.state_dir).set(
+                            "iv_download",
+                            "Paper IV update unavailable; stale symbols skipped "
+                            f"({type(exc).__name__})",
+                        )
                 try:
                     issues = refresh_reference(
                         caller,
                         cfg.universe.symbols,
                         cfg.reference_data_file,
                         Path(cfg.state_dir) / "iv.sqlite3",
-                        require_iv_rank=cfg.entry.require_iv_rank,
+                        require_iv_rank=(
+                            cfg.entry.require_iv_rank and not cfg.paper_iv_history_experiment
+                        ),
                     )
                     if issues:
                         Alerts(cfg.state_dir).set("reference", "; ".join(issues))
@@ -760,13 +782,17 @@ def reference_refresh(config: ConfigOpt = None):
     from .reference_feed import refresh_reference
 
     cfg = _load(config)
+    if cfg.paper_iv_history_experiment:
+        from .iv_history import refresh_latest
+
+        console.print(refresh_latest(cfg.state_dir, cfg.universe.symbols))
     path = cfg.reference_data_file or str(Path(cfg.state_dir) / "reference.json")
     errors = refresh_reference(
         HttpToolCaller(),
         cfg.universe.symbols,
         path,
         Path(cfg.state_dir) / "iv.sqlite3",
-        require_iv_rank=cfg.entry.require_iv_rank,
+        require_iv_rank=cfg.entry.require_iv_rank and not cfg.paper_iv_history_experiment,
     )
     console.print(f"Reference snapshot saved to {path}")
     for error in errors:
@@ -794,9 +820,13 @@ def iv_history_import(path: Path, config: ConfigOpt = None):
         report = import_history(path, cfg.state_dir, cfg.universe.symbols)
     except (ValueError, OSError) as exc:
         raise typer.BadParameter(str(exc)) from None
-    RuntimeStore(cfg.state_dir).event("iv_history_import", {
-        **report, "message": "IV research imported; execution filter unchanged",
-    })
+    RuntimeStore(cfg.state_dir).event(
+        "iv_history_import",
+        {
+            **report,
+            "message": "IV research imported; execution filter unchanged",
+        },
+    )
     console.print_json(data=report)
 
 
@@ -806,7 +836,13 @@ def iv_history_status(config: ConfigOpt = None):
     from .iv_history import history_status
 
     cfg = _load(config)
-    console.print_json(data=history_status(cfg.state_dir, cfg.universe.symbols))
+    console.print_json(
+        data=history_status(
+            cfg.state_dir,
+            cfg.universe.symbols,
+            experimental=cfg.paper_iv_history_experiment,
+        )
+    )
 
 
 @app.command("web-dashboard")

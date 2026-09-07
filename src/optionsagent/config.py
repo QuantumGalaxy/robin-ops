@@ -269,6 +269,7 @@ class Config(BaseSettings):
     data_provider: Literal["synthetic", "robinhood_mcp"] = "synthetic"
     reference_data_file: str | None = None
     reference_auto_refresh: bool = False
+    paper_iv_history_experiment: bool = False
     mode: Mode = Mode.PAPER
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
@@ -282,6 +283,16 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def validate_safety(self) -> Config:
+        if self.paper_iv_history_experiment and (
+            self.mode != Mode.PAPER
+            or self.broker.kind != "paper"
+            or self.data_provider != "robinhood_mcp"
+            or not self.entry.require_iv_rank
+        ):
+            raise ValueError(
+                "Research IV experiment requires Robinhood data, paper broker, "
+                "paper mode, and historical IV filtering enabled"
+            )
         if not self.entry.require_iv_rank and (
             self.mode != Mode.PAPER or self.broker.kind != "paper"
         ):

@@ -471,6 +471,38 @@ class TradingEngine:
             report.skipped.append(f"{symbol}: neutral or insufficient direction history")
             return
 
+        if cfg.paper_iv_history_experiment:
+            from .iv_history import paper_iv_rank
+
+            # Config validation restricts this alternate source to the paper broker.
+            details = paper_iv_rank(cfg.state_dir, symbol, now)
+            iv_rank = details["rank"]
+            eligible = iv_rank is not None and iv_rank <= cfg.entry.max_iv_rank
+            reason = (
+                details["reason"]
+                if iv_rank is None
+                else (
+                    f"experimental IV rank {iv_rank:.1%} "
+                    f"{'passes' if eligible else 'exceeds'} {cfg.entry.max_iv_rank:.0%} limit"
+                )
+            )
+            if self.store:
+                self.store.event(
+                    "paper_iv_decision",
+                    {
+                        **details,
+                        "symbol": symbol,
+                        "eligible": eligible,
+                        "threshold": cfg.entry.max_iv_rank,
+                        "message": f"{symbol}: {reason}",
+                    },
+                )
+            if not eligible:
+                report.skipped.append(f"{symbol}: {reason}")
+                return
+        else:
+            iv_rank = self.data.iv_rank(symbol)
+
         quotes = self.data.option_chain(symbol, cfg.entry.min_dte, cfg.entry.max_dte)
         if not quotes:
             report.skipped.append(f"{symbol}: no option quotes in the DTE range")
@@ -485,7 +517,7 @@ class TradingEngine:
         candidates = self.screener.screen(
             quotes,
             direction,
-            iv_rank=self.data.iv_rank(symbol),
+            iv_rank=iv_rank,
             days_to_earnings=days_to_earnings,
             confidence=confidence,
             as_of=now.date(),
