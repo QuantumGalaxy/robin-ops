@@ -69,10 +69,13 @@ class IVArchive:
     def rank(self, symbol, as_of, current_iv=None):
         with closing(sqlite3.connect(self.path)) as db, db:
             values = db.execute(
-                "SELECT day,iv FROM iv WHERE symbol=? AND day<=? ORDER BY day DESC LIMIT 252",
+                "SELECT day,iv,source FROM iv WHERE symbol=? AND day<=? "
+                "ORDER BY day DESC LIMIT 252",
                 (symbol, as_of.isoformat()),
             ).fetchall()
         if len(values) < 200 or date.fromisoformat(values[0][0]) != as_of:
+            return None, len(values)
+        if len({x[2] for x in values}) != 1:
             return None, len(values)
         v = [x[1] for x in values]
         if min(v) == max(v):
@@ -173,39 +176,49 @@ def refresh_reference(caller, symbols, path, iv_path, now=None):
                 entry.update(earnings_checked=True, earnings=None)
             else:
                 errors.append(f"{symbol}: next earnings date unavailable")
-            # Collect a representative completed-session ATM ~30D IV when quote date agrees.
-            chain = api.option_chains(symbol)
-            expiries = [
-                date.fromisoformat(d)
-                for d in chain.get("expiration_dates", [])
-                if 20 <= (date.fromisoformat(d) - completed).days <= 45
-            ]
-            q = api.equity_quote(symbol)
-            spot = float(q.get("last_trade_price", 0))
-            if expiries and spot > 0:
-                exp = min(expiries, key=lambda d: abs((d - completed).days - 30))
-                instruments = api.option_instruments(symbol, exp, "call")
-                eligible = [
-                    r
-                    for r in instruments
-                    if float(r.get("trade_value_multiplier", 100)) == 100
-                    and r.get("underlying_type", "equity") == "equity"
+            with closing(sqlite3.connect(archive.path)) as db:
+                sources = [
+                    r[0]
+                    for r in db.execute("SELECT DISTINCT source FROM iv WHERE symbol=?", (symbol,))
                 ]
-                if eligible:
-                    atm = min(eligible, key=lambda r: abs(float(r["strike_price"]) - spot))
-                    quotes = api.option_quotes([atm["id"]])
-                    if quotes:
-                        quote = quotes[0]
-                        stamp = datetime.fromisoformat(quote["updated_at"].replace("Z", "+00:00"))
-                        close = datetime.fromisoformat(session(completed)["close"])
-                        if close - timedelta(minutes=15) <= stamp <= close:
-                            archive.add(
-                                symbol,
-                                completed,
-                                float(quote["implied_volatility"]),
-                                "Robinhood near-close ATM call, 20-45D nearest 30D",
-                                now,
+            # Never overwrite a vendor archive with a different IV definition.
+            external = any(not source.startswith("Robinhood near-close ATM") for source in sources)
+            if not external:
+                # Collect a representative completed-session ATM ~30D IV when quote date agrees.
+                chain = api.option_chains(symbol)
+                expiries = [
+                    date.fromisoformat(d)
+                    for d in chain.get("expiration_dates", [])
+                    if 20 <= (date.fromisoformat(d) - completed).days <= 45
+                ]
+                q = api.equity_quote(symbol)
+                spot = float(q.get("last_trade_price", 0))
+                if expiries and spot > 0:
+                    exp = min(expiries, key=lambda d: abs((d - completed).days - 30))
+                    instruments = api.option_instruments(symbol, exp, "call")
+                    eligible = [
+                        r
+                        for r in instruments
+                        if float(r.get("trade_value_multiplier", 100)) == 100
+                        and r.get("underlying_type", "equity") == "equity"
+                    ]
+                    if eligible:
+                        atm = min(eligible, key=lambda r: abs(float(r["strike_price"]) - spot))
+                        quotes = api.option_quotes([atm["id"]])
+                        if quotes:
+                            quote = quotes[0]
+                            stamp = datetime.fromisoformat(
+                                quote["updated_at"].replace("Z", "+00:00")
                             )
+                            close = datetime.fromisoformat(session(completed)["close"])
+                            if close - timedelta(minutes=15) <= stamp <= close:
+                                archive.add(
+                                    symbol,
+                                    completed,
+                                    float(quote["implied_volatility"]),
+                                    "Robinhood near-close ATM call, 20-45D nearest 30D",
+                                    now,
+                                )
             rank, n = archive.rank(symbol, completed)
             entry.update(iv_rank=rank, iv_history_days=n)
             if rank is None:

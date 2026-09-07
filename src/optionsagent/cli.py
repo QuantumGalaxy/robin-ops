@@ -872,5 +872,44 @@ def lifecycle_replay(evidence: Path, database: Path):
     console.print({"events_checked": len(results), "results": results})
 
 
+@app.command("alpha-key")
+def alpha_key():
+    """Save an Alpha Vantage key privately in the native OS credential store."""
+    from getpass import getpass
+
+    from .alpha_vantage import save_key
+
+    save_key(getpass("Alpha Vantage API key (hidden): "))
+    console.print("Key saved privately. No API requests made.")
+
+
+@app.command("alpha-history")
+def alpha_history(
+    output: Path,
+    config: ConfigOpt = None,
+    days: int = 252,
+    max_requests: int = 10,
+    rpm: int = 5,
+    symbol: str | None = None,
+):
+    """Download resumable EOD IV history; default request budget is ten. No orders."""
+    from .alpha_vantage import AlphaClient, download, load_key
+
+    cfg = _load(config)
+    try:
+        result = download(
+            AlphaClient(load_key(), rpm),
+            [symbol] if symbol else cfg.universe.symbols,
+            output,
+            days,
+            max_requests,
+        )
+        console.print(result)
+        console.print("History saved; not imported or enabled for trading automatically.")
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(1) from None
+
+
 if __name__ == "__main__":
     app()

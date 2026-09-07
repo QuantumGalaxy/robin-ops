@@ -108,3 +108,24 @@ Fixture shape: `intents` is a list of `{identity, account, contract, side, qty}`
 On September 7, 2026, the application successfully read AAPL's quote, a normal options chain with 24 expiries, 90 completed daily closes, an upcoming earnings date and one IV observation through its standalone OAuth client. An isolated real-data/paper-broker cycle correctly blocked entries outside the verified session. No actual account balances, holdings or real order endpoints were used.
 
 The automated suite covers data schemas, pagination, holidays, exits, sizing, restart/duplicate protection, persistence, uncertain fills, lifecycle evidence, repair guards and private dashboard authorization. Still required: a sourced IV archive, sustained market-hours paper operation, complete historical option quote paths, and an evidence-based strategy assessment. The original weak profit-factor results remain a reason to keep live trading disabled. A +10% trailing trigger cannot guarantee a +10% realized profit when quotes gap or exits do not fill.
+
+## Alpha Vantage historical IV
+
+`optionsagent alpha-key` prompts for a hidden key and stores it in the native credential store, separate from Robinhood. A free key alone does not establish historical-options entitlement. Verify with a two-request, one-symbol test:
+
+```sh
+optionsagent alpha-key
+optionsagent alpha-history state/alpha/iv.csv --symbol AAPL --days 1 --max-requests 2
+```
+
+With confirmed premium access, download the configured universe in resumable batches:
+
+```sh
+optionsagent alpha-history state/alpha/iv.csv --config config/paper-robinhood.yaml --days 252 --max-requests 100 --rpm 5
+```
+
+The default is only ten requests per invocation. Choose a rate within your plan. One symbol needs one unadjusted daily-price request plus approximately 252 option-chain requests; the 20-symbol universe needs approximately 5,060 requests, plus daily-price reloads on resumed batches. Resume with the same output filename. A successful file contains only dated standard calls, expiry 20–45 DTE nearest 30 days, strike nearest that day's unadjusted close. The IV must be positive and its bid/ask valid. Missing days are reported, never fabricated. The output is a vendor-specific approximate ATM series, not a constant-maturity interpolated index.
+
+After checking coverage, import it with `iv-import` and rebuild reference data. Do not import the one-day probe as a ready archive. The rank rejects mixed source definitions, and Robinhood's forward collector leaves external archives untouched. Continue refreshing Alpha Vantage history daily and importing it; this vendor download is manual, not an automatic background subscription. Live execution remains disabled.
+
+Documentation: https://www.alphavantage.co/documentation/#historical-options
