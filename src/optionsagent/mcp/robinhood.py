@@ -21,6 +21,7 @@ import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from .client import ToolCaller
 
@@ -59,7 +60,19 @@ def rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [r for r in payload if isinstance(r, dict)]
     if isinstance(payload, dict):
-        for key in ("results", "data", "items", "options", "positions", "orders", "quotes"):
+        if isinstance(payload.get("data"), dict):
+            return rows(payload["data"])
+        for key in (
+            "results",
+            "data",
+            "items",
+            "options",
+            "positions",
+            "orders",
+            "quotes",
+            "chains",
+            "instruments",
+        ):
             inner = payload.get(key)
             if isinstance(inner, list):
                 return [r for r in inner if isinstance(r, dict)]
@@ -131,28 +144,67 @@ class RobinhoodMcp:
 
     def equity_quote(self, symbol: str) -> dict[str, Any]:
         result = rows(self.caller.call(GET_EQUITY_QUOTES, {"symbols": [symbol]}))
-        return result[0] if result else {}
+        for row in result:
+            quote = row.get("quote", row)
+            if isinstance(quote, dict) and quote.get("symbol", symbol) == symbol:
+                return quote
+        return {}
 
     # ---- options ---------------------------------------------------------
 
     def option_chains(self, symbol: str) -> dict[str, Any]:
-        result = rows(self.caller.call(GET_OPTION_CHAINS, {"symbol": symbol}))
-        return result[0] if result else {}
+        result = rows(self.caller.call(GET_OPTION_CHAINS, {"underlying_symbol": symbol}))
+        valid = [
+            r
+            for r in result
+            if r.get("symbol", symbol) == symbol
+            and as_float(r.get("trade_value_multiplier", 100)) == 100
+            and not r.get("cash_component")
+            and not r.get("settle_on_open", False)
+        ]
+        if len(valid) != 1:
+            return {}
+        return valid[0]
 
     def option_instruments(
         self, symbol: str, expiration: date | None = None, option_type: str | None = None
     ) -> list[dict[str, Any]]:
-        args: dict[str, Any] = {"symbol": symbol}
+        args: dict[str, Any] = {
+            "chain_symbol": symbol,
+            "state": "active",
+            "tradability": "tradable",
+        }
         if expiration:
-            args["expiration_date"] = expiration.strftime("%Y-%m-%d")
+            args["expiration_dates"] = expiration.strftime("%Y-%m-%d")
         if option_type:
             args["type"] = option_type
-        return rows(self.caller.call(GET_OPTION_INSTRUMENTS, args))
+        return self.paginated(GET_OPTION_INSTRUMENTS, args)
 
     def option_quotes(self, instrument_ids: list[str]) -> list[dict[str, Any]]:
         if not instrument_ids:
             return []
-        return rows(self.caller.call(GET_OPTION_QUOTES, {"ids": instrument_ids}))
+        return [
+            q
+            for r in rows(self.caller.call(GET_OPTION_QUOTES, {"instrument_ids": instrument_ids}))
+            if isinstance(q := r.get("quote", r), dict)
+        ]
+
+    def paginated(self, name, args):
+        out, seen = [], set()
+        args = dict(args)
+        for _ in range(100):
+            response = self.caller.call(name, args)
+            out.extend(rows(response))
+            data = response.get("data", response) if isinstance(response, dict) else {}
+            next_url = data.get("next")
+            if not next_url:
+                return out
+            cursor = parse_qs(urlsplit(next_url).query).get("cursor", [])
+            if len(cursor) != 1 or cursor[0] in seen:
+                raise ValueError("Invalid or repeated pagination cursor")
+            seen.add(cursor[0])
+            args["cursor"] = cursor[0]
+        raise ValueError("Pagination limit exceeded")
 
     def option_positions(self) -> list[dict[str, Any]]:
         return rows(self.caller.call(GET_OPTION_POSITIONS, {"status": "open"}))

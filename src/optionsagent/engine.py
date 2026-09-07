@@ -174,6 +174,22 @@ class TradingEngine:
     def _checkpoint(self, report=None):
         if self.store:
             self.store.save(self)
+            from .health import Alerts
+
+            alerts = Alerts(self.config.state_dir)
+            if report:
+                if report.errors:
+                    alerts.set("monitoring", "; ".join(report.errors), "critical")
+                else:
+                    alerts.clear("monitoring")
+                if self.reconcile_halt or self.orders.pending():
+                    alerts.set(
+                        "recovery",
+                        self.reconcile_halt or "Unresolved order requires recovery",
+                        "critical",
+                    )
+                else:
+                    alerts.clear("recovery")
             if report:
                 from dataclasses import asdict
 
@@ -374,6 +390,9 @@ class TradingEngine:
                 log.exception("exit submission uncertain for %s", position.contract)
                 continue
             if fill is None:
+                report.errors.append(
+                    f"{position.contract}: exit did not fill; monitoring continues"
+                )
                 log.warning(
                     "exit order for %s did not fill (%s); retrying next loop",
                     position.contract,

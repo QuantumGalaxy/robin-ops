@@ -1,0 +1,10 @@
+mode: paper
+data_provider: robinhood_mcp
+reference_auto_refresh: true
+reference_data_file: state/robinhood-paper/reference.json
+state_dir: state/robinhood-paper
+broker:
+  kind: paper
+  starting_equity: 25000
+risk:
+  kill_switch_file: state/robinhood-paper/KILL

@@ -1,5 +1,9 @@
 # optionsagent
 
+## Private dashboard and paper operations
+
+See [the paper MVP operating guide](docs/PAPER-MVP.md) for the local dashboard, standalone Robinhood data connection, automatic reference feeds, alerts, reviewed recovery, quote capture and replay. Real trading remains disabled; sufficient sourced IV history is still required before real-data paper entries.
+
 Simulation-first options agent with a deterministic scanner, contract selector,
 risk controls, exit rules, durable account state, and a terminal dashboard.
 

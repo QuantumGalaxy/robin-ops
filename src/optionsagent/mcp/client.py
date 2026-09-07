@@ -201,6 +201,9 @@ class HttpToolCaller:
             "get_accounts",
             "get_account",
             "get_equity_historicals",
+            "get_option_historicals",
+            "get_earnings_results",
+            "get_earnings_calendar",
             "review_option_order",
         }:
             raise McpError("Live mutation tools are disabled in this simulation release")

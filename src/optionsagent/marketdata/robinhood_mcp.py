@@ -29,7 +29,7 @@ from .reference import ReferenceSnapshot
 
 log = logging.getLogger(__name__)
 
-QUOTE_BATCH_SIZE = 50
+QUOTE_BATCH_SIZE = 20
 
 
 @dataclass
@@ -62,9 +62,14 @@ class RobinhoodMcpMarketData(MarketDataProvider):
 
     def underlying_price(self, symbol: str) -> float | None:
         row = self.api.equity_quote(symbol)
+        if row.get("has_traded") is False or row.get("state", "active") != "active":
+            return None
+        # Use the regular-session trade timestamp paired with its price.
         try:
             stamp = datetime.fromisoformat(
-                str(pick(row, "updated_at", "as_of", "timestamp")).replace("Z", "+00:00")
+                str(pick(row, "venue_last_trade_time", "updated_at", "as_of", "timestamp")).replace(
+                    "Z", "+00:00"
+                )
             )
             if stamp.tzinfo is None or not -5 <= (datetime.now(UTC) - stamp).total_seconds() <= 120:
                 return None
@@ -106,7 +111,18 @@ class RobinhoodMcpMarketData(MarketDataProvider):
     def _instrument_rows(self, symbol: str, expiry: date, right: str) -> list[dict]:
         key = f"{symbol}|{expiry:%Y-%m-%d}|{right}"
         if key not in self._instruments:
-            self._instruments[key] = self.api.option_instruments(symbol, expiry, right)
+            raw = self.api.option_instruments(symbol, expiry, right)
+            self._instruments[key] = [
+                r
+                for r in raw
+                if r.get("chain_symbol", symbol) == symbol
+                and r.get("type", right) == right
+                and r.get("expiration_date", expiry.isoformat()) == expiry.isoformat()
+                and r.get("state", "active") == "active"
+                and r.get("tradability", "tradable") == "tradable"
+                and as_float(r.get("trade_value_multiplier", 100)) == 100
+                and r.get("underlying_type", "equity") == "equity"
+            ]
         return self._instruments[key]
 
     def _build_quote(self, row: dict, contract: OptionContract, spot: float) -> OptionQuote | None:

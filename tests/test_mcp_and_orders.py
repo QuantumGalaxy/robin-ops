@@ -115,7 +115,7 @@ def build_market_data() -> tuple[RobinhoodMcpMarketData, FakeToolCaller]:
                         "open_interest": "4200",
                         "volume": "310",
                     }
-                    for i in args["ids"]
+                    for i in args["instrument_ids"]
                 ]
             },
         },

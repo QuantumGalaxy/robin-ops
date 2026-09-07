@@ -1,0 +1,110 @@
+# Private paper-agent operating guide
+
+This release runs on your Mac. The supported runner only uses a paper broker. Robinhood supplies market data through the application's own OAuth connection. No real order submission is enabled. A working connection and passing software tests do not establish a profitable strategy.
+
+## Start from the repository folder
+
+Install or update in your existing Python environment:
+
+```sh
+python -m pip install -e '.[dev,oauth]'
+optionsagent auth-status
+```
+
+If not signed in, use `optionsagent auth-login`. Complete Robinhood's own consent page; do not paste passwords or tokens into configuration. Credentials live in macOS Keychain. The provider grant is broader than this application's read-only tool allowlist. Logging out removes local credentials; revoke the grant in Robinhood if you also want provider access removed.
+
+For a synthetic demonstration, run these in separate Terminal tabs:
+
+```sh
+optionsagent run --config config/recommended.yaml --loops -1
+optionsagent web-dashboard --config config/recommended.yaml
+```
+
+The dashboard opens a private `127.0.0.1` page with a random per-launch access token. Do not share its full link. It shows paper equity, cash, marked and realized P&L, holdings, exit thresholds, trades, entry blocks, pending orders, recent decisions, data readiness and alerts. Pause blocks new entries while monitoring existing holdings. Resume removes the manual pause; it does not clear reconciliation or risk halts. Closing the dashboard does not stop the runner.
+
+## Paper trading with Robinhood quotes
+
+Use the same configuration for every process:
+
+```sh
+optionsagent reference-refresh --config config/paper-robinhood.yaml
+optionsagent run --config config/paper-robinhood.yaml --loops -1
+```
+
+In a second tab:
+
+```sh
+optionsagent web-dashboard --config config/paper-robinhood.yaml
+```
+
+Optional third tab for native Mac notifications:
+
+```sh
+optionsagent monitor --config config/paper-robinhood.yaml --notify
+```
+
+This configuration isolates its $25,000 simulated balance in `state/robinhood-paper`. It does not use or transfer your real account balance. The background reference worker refreshes hourly using its own connection so slow reference requests cannot delay exit monitoring. For a one-cycle test, run `reference-refresh` first, then `run --loops 1`. The independent monitor detects a missing or stale heartbeat; it cannot monitor while the Mac is asleep or all processes are stopped.
+
+## Required reference data
+
+The automatic feed collects completed split-adjusted daily closes, upcoming earnings when supplied by Robinhood, XNYS holidays and shortened sessions, and available near-close ATM call IV around 30 DTE. Unknown earnings, stale prices, incomplete history and closed sessions block entries.
+
+**The IV rank requires at least 200 sourced completed-session observations, using up to 252.** Robinhood's available tool schemas do not provide a ready-made historical ATM IV series. Forward collection starts with one observation. To avoid waiting for 200 sessions, obtain consistent daily ATM approximately 30-day implied volatility from a legitimate historical data source, then import a CSV:
+
+```csv
+symbol,date,iv,source
+AAPL,2026-09-04,0.30,Provider and dataset identifier
+```
+
+The example row only illustrates the format; it is not verified market history. IV is annualized decimal volatility, not a percentage or realized volatility. Do not mix different definitions to fill gaps. Import all actual rows and rebuild the reference:
+
+```sh
+optionsagent iv-import /absolute/path/history.csv --config config/paper-robinhood.yaml
+optionsagent reference-refresh --config config/paper-robinhood.yaml
+```
+
+No paid provider or subscription has been chosen. The daily rank currently describes the latest completed session, not an intraday rank. Software cannot manufacture missing evidence of an edge.
+
+## Capture and historical evaluation
+
+```sh
+optionsagent capture-quotes state/robinhood-paper/quotes.jsonl --config config/paper-robinhood.yaml
+optionsagent replay state/robinhood-paper/quotes.jsonl state/robinhood-paper/replay.json --config config/paper-robinhood.yaml
+```
+
+Capture appends one observation; call it at each desired observation time. It includes current entry candidates and held contracts even after they leave the entry DTE window. The runner does not automatically schedule captures. Keep full holding-period paths, including failed or absent quotes. At least six observations are needed for the default three-fold report, but that minimum is only a software requirement, not statistically useful evidence.
+
+Replay runs the strategy with dated quotes and supplied point-in-time reference snapshots. It rejects future or stale reference timestamps and reports monitoring gaps. It evaluates a fixed configuration in sequential held-out folds, each starting flat, and compares ordinary and worse fill assumptions. It does not tune parameters on the historical prefix. Open holdings remain marked at the end; they are not silently liquidated. Returns with incomplete quote paths or stale marks are not reliable. This is not an order-book, queue-position or partial-fill market simulator.
+
+## Recovery
+
+Stop the runner before repair; a writer lock prevents concurrent account edits. Recovery takes a JSON evidence file and previews by default:
+
+```sh
+optionsagent recover /absolute/path/evidence.json --config config/paper-robinhood.yaml
+optionsagent recover /absolute/path/evidence.json --config config/paper-robinhood.yaml --apply
+```
+
+Supported evidence types:
+
+- `resolve_order`: requires `order_id`, `resolution: "verified_no_execution"`, `executed_quantity: 0`, and `working: false` for a pending paper order.
+- `settlement`: requires an expired matched paper holding's `contract` (OCC symbol), `expiry`, and independently verified `settlement_per_share`. This is reviewed simulated settlement accounting, not real exercise or assignment processing.
+- `clear_reconcile`: only clears the halt when holdings match and no order is pending.
+
+All require nonempty `source` and `reason`. Newer order-journal evidence blocks repair until runner restoration incorporates it. Never assert zero execution just to remove a warning. Applied repairs retain the prior checkpoint and review reason in the SQLite audit log. Back up the stopped agent's entire state folder before repairs.
+
+## Broker lifecycle foundation
+
+`lifecycle.py` provides a separate transactional evidence ledger for account-scoped intents, execution deduplication, partial fills, cancellation acknowledgement, late fills, quantity/cash comparison, and protective limit tick rounding. Test supplied normalized fixtures with:
+
+```sh
+optionsagent lifecycle-replay /absolute/path/fixture.json /absolute/path/new-ledger.sqlite3
+```
+
+Fixture shape: `intents` is a list of `{identity, account, contract, side, qty}`; `events` contains `{identity, account, broker_id, state, executions, source}`; each execution has `{id, quantity, price, fee}`. Use a new database path. This command performs no network calls. The ledger is a tested foundation, **not a connected live execution engine**. Provider-specific execution envelopes, live account cash/position reconciliation, exercise/assignment and real cancellation acceptance still need dedicated integration and acceptance testing before a future live release.
+
+## Validation and remaining acceptance work
+
+On September 7, 2026, the application successfully read AAPL's quote, a normal options chain with 24 expiries, 90 completed daily closes, an upcoming earnings date and one IV observation through its standalone OAuth client. An isolated real-data/paper-broker cycle correctly blocked entries outside the verified session. No actual account balances, holdings or real order endpoints were used.
+
+The automated suite covers data schemas, pagination, holidays, exits, sizing, restart/duplicate protection, persistence, uncertain fills, lifecycle evidence, repair guards and private dashboard authorization. Still required: a sourced IV archive, sustained market-hours paper operation, complete historical option quote paths, and an evidence-based strategy assessment. The original weak profit-factor results remain a reason to keep live trading disabled. A +10% trailing trigger cannot guarantee a +10% realized profit when quotes gap or exits do not fill.

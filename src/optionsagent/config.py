@@ -267,6 +267,7 @@ class Config(BaseSettings):
 
     data_provider: Literal["synthetic", "robinhood_mcp"] = "synthetic"
     reference_data_file: str | None = None
+    reference_auto_refresh: bool = False
     mode: Mode = Mode.PAPER
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)

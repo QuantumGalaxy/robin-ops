@@ -383,6 +383,11 @@ def run(
             starting_equity=cfg.broker.starting_equity,
             clock=lambda: _sim_now(data) or datetime.now(UTC),
         )
+        if cfg.data_provider == "robinhood_mcp" and cfg.reference_auto_refresh:
+            cfg.reference_data_file = cfg.reference_data_file or str(
+                Path(cfg.state_dir) / "reference.json"
+            )
+            data.reference_data_file = cfg.reference_data_file
         store = RuntimeStore(cfg.state_dir)
         # The database checkpoint is authoritative. JSON files are legacy exports.
         portfolio = Portfolio(cfg.state_dir) if store.read() else Portfolio.load(cfg.state_dir)
@@ -393,6 +398,37 @@ def run(
         import time as wall_time
 
         count = 0
+        from threading import Event, Thread
+
+        reference_stop = Event()
+
+        def refresh_worker():
+            from .health import Alerts
+            from .mcp.client import HttpToolCaller
+            from .reference_feed import refresh_reference
+
+            # A separate connection keeps slow reference requests off the exit-monitor path.
+            caller = HttpToolCaller()
+            while not reference_stop.is_set():
+                try:
+                    issues = refresh_reference(
+                        caller,
+                        cfg.universe.symbols,
+                        cfg.reference_data_file,
+                        Path(cfg.state_dir) / "iv.sqlite3",
+                    )
+                    if issues:
+                        Alerts(cfg.state_dir).set("reference", "; ".join(issues))
+                    else:
+                        Alerts(cfg.state_dir).clear("reference")
+                except Exception as exc:
+                    Alerts(cfg.state_dir).set(
+                        "reference", f"Reference refresh failed: {type(exc).__name__}"
+                    )
+                reference_stop.wait(3600)
+
+        if cfg.data_provider == "robinhood_mcp" and cfg.reference_auto_refresh:
+            Thread(target=refresh_worker, daemon=True).start()
         try:
             while loops < 0 or count < loops:
                 if hasattr(data, "step"):
@@ -419,6 +455,8 @@ def run(
                     wall_time.sleep(cfg.execution.poll_interval_seconds)
         except KeyboardInterrupt:
             engine._checkpoint()
+        finally:
+            reference_stop.set()
         _print_status(portfolio)
 
 
@@ -663,10 +701,6 @@ def mcp_probe(
         console.print(f"[dim]wrote {snapshot} — diff it after any Robinhood update[/dim]")
 
 
-if __name__ == "__main__":
-    app()
-
-
 @app.command("auth-login")
 def auth_login(no_browser: bool = typer.Option(False, "--no-browser")):
     """Connect robin-ops directly to Robinhood using its own OAuth client."""
@@ -716,3 +750,127 @@ def auth_logout():
     except AuthError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from None
+
+
+@app.command("reference-refresh")
+def reference_refresh(config: ConfigOpt = None):
+    """Collect daily prices, earnings, exchange sessions and available IV history."""
+    from .mcp.client import HttpToolCaller
+    from .reference_feed import refresh_reference
+
+    cfg = _load(config)
+    path = cfg.reference_data_file or str(Path(cfg.state_dir) / "reference.json")
+    errors = refresh_reference(
+        HttpToolCaller(), cfg.universe.symbols, path, Path(cfg.state_dir) / "iv.sqlite3"
+    )
+    console.print(f"Reference snapshot saved to {path}")
+    for error in errors:
+        console.print(error)
+
+
+@app.command("iv-import")
+def iv_import(path: Path, config: ConfigOpt = None):
+    """Import sourced daily ATM ~30D IV observations (symbol,date,iv,source CSV)."""
+    from .reference_feed import IVArchive
+
+    cfg = _load(config)
+    count = IVArchive(Path(cfg.state_dir) / "iv.sqlite3").import_csv(path)
+    console.print(f"Imported {count} daily IV observations; no trading settings changed.")
+
+
+@app.command("web-dashboard")
+def web_dashboard(config: ConfigOpt = None, port: int = 8766, no_browser: bool = False):
+    """Serve the private browser dashboard on this Mac only."""
+    from .webserver import serve
+
+    serve(_load(config), port, not no_browser)
+
+
+@app.command("recover")
+def recover(evidence: Path, config: ConfigOpt = None, apply: bool = False):
+    """Preview a sourced paper-account repair; --apply records and applies it."""
+    from .recovery import repair
+
+    console.print(repair(_load(config).state_dir, evidence, apply))
+
+
+@app.command("replay")
+def replay_command(path: Path, output: Path, config: ConfigOpt = None, folds: int = 3):
+    """Replay sourced point-in-time quotes and write held-out/stressed results."""
+    from .replay import load_frames, replay, walk_forward
+
+    cfg = _load(config)
+    frames = load_frames(path)
+    result = {"full_period": replay(cfg, frames), "walk_forward": walk_forward(cfg, frames, folds)}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2))
+    console.print(
+        f"Replay report saved to {output}. Review data coverage before interpreting returns."
+    )
+
+
+@app.command("capture-quotes")
+def capture_quotes(output: Path, config: ConfigOpt = None):
+    """Append one sourced market-data snapshot for future replay; no orders."""
+    from .replay import capture
+
+    cfg = _load(config)
+    if cfg.data_provider != "robinhood_mcp" or not cfg.reference_data_file:
+        raise typer.BadParameter("Use a Robinhood paper config with reference_data_file")
+    data = build_provider(cfg.data_provider, risk_free_rate=cfg.market.risk_free_rate)
+    data.reference_data_file = cfg.reference_data_file
+    console.print(f"Captured {capture(data, cfg, output)} quotes")
+
+
+@app.command("monitor")
+def monitor(config: ConfigOpt = None, notify: bool = False, once: bool = False):
+    """Independent heartbeat monitor; optional native Mac notifications."""
+    import subprocess
+    import sys
+    import time
+
+    from .health import Alerts
+
+    cfg = _load(config)
+    alerts = Alerts(cfg.state_dir)
+    seen = set()
+    while True:
+        alerts.watchdog(max(180, cfg.execution.poll_interval_seconds * 3))
+        for alert in alerts.list():
+            identity = (alert["key"], alert["updated_at"])
+            if alert["active"] and not alert["acknowledged"] and identity not in seen:
+                console.print(alert["severity"] + ": " + alert["message"])
+                seen.add(identity)
+                if notify and sys.platform == "darwin":
+                    subprocess.run(
+                        [
+                            "osascript",
+                            "-e",
+                            'display notification "Paper agent needs attention. '
+                            'Open your local dashboard." with title "Robin Ops"',
+                        ],
+                        check=False,
+                        capture_output=True,
+                    )
+        if once:
+            return
+        time.sleep(30)
+
+
+@app.command("lifecycle-replay")
+def lifecycle_replay(evidence: Path, database: Path):
+    """Validate sourced broker lifecycle fixtures in an isolated local ledger; no API calls."""
+    from .lifecycle import Lifecycle
+
+    if database.exists():
+        raise typer.BadParameter("Use a new database path to preserve prior evidence")
+    fixture = json.loads(evidence.read_text())
+    ledger = Lifecycle(database)
+    for intent in fixture["intents"]:
+        ledger.reserve(**intent)
+    results = [ledger.apply(**event) for event in fixture["events"]]
+    console.print({"events_checked": len(results), "results": results})
+
+
+if __name__ == "__main__":
+    app()
