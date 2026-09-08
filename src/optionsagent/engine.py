@@ -471,11 +471,22 @@ class TradingEngine:
             report.skipped.append(f"{symbol}: neutral or insufficient direction history")
             return
 
+        if cfg.entry.require_market_alignment:
+            market_direction, _ = self.signal.direction("SPY", self.history)
+            if market_direction != direction:
+                report.skipped.append(f"{symbol}: SPY direction does not confirm {direction}")
+                return
+
         if cfg.paper_iv_history_experiment:
             from .iv_daily import select_rank
 
             # Config validation restricts this alternate source to the paper broker.
-            details = select_rank(cfg.state_dir, symbol, now, auto=cfg.paper_iv_auto_switch)
+            details = select_rank(
+                cfg.iv_history_state_dir or cfg.state_dir,
+                symbol,
+                now,
+                auto=cfg.paper_iv_auto_switch,
+            )
             iv_rank = details["rank"]
             eligible = iv_rank is not None and iv_rank <= cfg.entry.max_iv_rank
             reason = (
@@ -569,6 +580,10 @@ class TradingEngine:
                     "ask": best.quote.ask,
                     "quantity": sizing.contracts,
                     "reasons": best.reasons,
+                    "direction": direction,
+                    "confidence": confidence,
+                    "iv_rank": iv_rank,
+                    "greeks": vars(best.quote.greeks) if best.quote.greeks else None,
                 },
             )
         fill = self._buy_with_reprice(best.quote, sizing.contracts, now)

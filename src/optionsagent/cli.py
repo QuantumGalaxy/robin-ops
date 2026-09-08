@@ -1013,3 +1013,37 @@ def iv_collect_daily(config: ConfigOpt = None):
                 "iv_collector", f"Daily IV collector failed ({type(exc).__name__})"
             )
             raise typer.Exit(1) from None
+
+
+@app.command("paper-compare")
+def paper_compare(config: ConfigOpt = None, loops: int = 1):
+    """Run isolated forward paper experiments; no real orders or automatic promotion."""
+    import time
+
+    from .paper_lab import PaperLab, experiment_configs
+
+    cfg = _load(config)
+    experiment_configs(cfg)
+    data = build_provider(cfg.data_provider, risk_free_rate=cfg.market.risk_free_rate)
+    data.reference_data_file = cfg.reference_data_file
+    lab = PaperLab(cfg, data)
+    try:
+        count = 0
+        while loops < 0 or count < loops:
+            lab.run_once()
+            count += 1
+            if loops < 0:
+                time.sleep(cfg.execution.poll_interval_seconds)
+    finally:
+        lab.close()
+        data.close()
+
+
+@app.command("daily-report")
+def daily_report_command(config: ConfigOpt = None):
+    """Archive readable daily paper reports and their structured audit evidence."""
+    from .daily_report import archive_reports
+
+    cfg = _load(config)
+    with single_writer(Path(cfg.state_dir) / "report-lock"):
+        archive_reports(cfg.state_dir)

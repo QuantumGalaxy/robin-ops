@@ -1,0 +1,12 @@
+[Unit]
+Description=Archive daily paper trading reviews
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/robin-ops
+ExecStart=/home/ubuntu/robin-ops/.venv/bin/optionsagent daily-report --config config/paper-robinhood.yaml
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/robin-ops/state

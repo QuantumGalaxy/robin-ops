@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh paper review archives every five minutes
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=300
+Unit=robin-ops-report.service
+[Install]
+WantedBy=timers.target

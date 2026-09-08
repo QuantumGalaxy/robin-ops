@@ -15,7 +15,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .health import Alerts
 from .runtime import RuntimeStore
@@ -51,6 +51,7 @@ def dashboard_token(state_dir):
 
 def state(config):
     from .iv_history import history_status
+    from .paper_lab import comparison_status
 
     iv_history = history_status(
         config.state_dir,
@@ -163,6 +164,7 @@ def state(config):
         "reference": reference,
         "iv_history": iv_history,
         "entry_block": latest_block,
+        "experiments": comparison_status(config.state_dir),
     }
 
 
@@ -253,6 +255,17 @@ def make_server(config, port=8766, token=None):
                 return
             if not self.authorized():
                 self.send(403, {"error": "Unauthorized"})
+                return
+            if urlsplit(self.path).path == "/api/report":
+                from .daily_report import daily_report
+
+                try:
+                    day = parse_qs(urlsplit(self.path).query).get("date", [""])[0]
+                    self.send(200, daily_report(config.state_dir, day))
+                except ValueError:
+                    self.send(400, {"error": "Use a date in YYYY-MM-DD format"})
+                except (OSError, sqlite3.Error):
+                    self.send(503, {"error": "Report unavailable"})
                 return
             if self.path != "/api/state":
                 self.send(404, {"error": "Not found"})

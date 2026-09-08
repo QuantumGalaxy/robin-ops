@@ -72,6 +72,7 @@ class UniverseConfig(StrictConfig):
 class EntryConfig(StrictConfig):
     """Filters applied to every contract before it can be bought."""
 
+    require_market_alignment: bool = False
     min_dte: int = 12
     max_dte: int = 18
     """User-requested 12–18 calendar-day contracts; experimental profiles are separate."""
@@ -272,6 +273,7 @@ class Config(BaseSettings):
     paper_iv_history_experiment: bool = False
     robinhood_iv_daily_collection: bool = False
     paper_iv_auto_switch: bool = False
+    iv_history_state_dir: str | None = None
     mode: Mode = Mode.PAPER
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
@@ -285,6 +287,12 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def validate_safety(self) -> Config:
+        if (self.iv_history_state_dir or self.entry.require_market_alignment) and (
+            self.mode != Mode.PAPER or self.broker.kind != "paper"
+        ):
+            raise ValueError("Experimental history routing and market alignment are paper-only")
+        if self.entry.require_market_alignment and "SPY" not in self.universe.symbols:
+            raise ValueError("Market alignment requires SPY in the configured universe")
         if (self.robinhood_iv_daily_collection or self.paper_iv_auto_switch) and (
             self.mode != Mode.PAPER
             or self.broker.kind != "paper"

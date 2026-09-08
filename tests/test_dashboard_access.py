@@ -52,8 +52,11 @@ def test_cookie_restores_access_and_survives_server_restart(tmp_path, monkeypatc
     origin = f"http://127.0.0.1:{port}"
     try:
         assert request("GET", "/api/state")[0] == 403
+        assert request("GET", "/api/report?date=2026-09-08")[0] == 403
         assert request("POST", "/api/session")[0] == 403
         auth = {"Authorization": "Bearer " + token}
+        assert request("GET", "/api/report?date=bad", auth)[0] == 400
+        assert request("GET", "/api/report?date=2026-09-08", auth)[0] == 200
         assert request("POST", "/api/session", {**auth, "Origin": "https://evil.test"})[0] == 403
         status, headers, _ = request("POST", "/api/session", {**auth, "Origin": origin})
         assert status == 200
