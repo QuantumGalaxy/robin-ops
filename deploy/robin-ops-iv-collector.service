@@ -1,0 +1,24 @@
+[Unit]
+Description=Robin Ops daily Robinhood IV collector
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/robin-ops
+Environment=ROBIN_OPS_CREDENTIAL_FILE=/home/ubuntu/.config/robin-ops/oauth.enc
+LoadCredential=oauth-key:/etc/robin-ops/oauth-key
+ExecStart=/home/ubuntu/robin-ops/.venv/bin/optionsagent iv-collect-daily --config config/paper-robinhood.yaml
+TimeoutStartSec=300
+TimeoutStopSec=90
+KillSignal=SIGINT
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/robin-ops/state /home/ubuntu/.config/robin-ops /home/ubuntu/.local/state/robin-ops
+

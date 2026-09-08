@@ -108,6 +108,15 @@ class CredentialStore:
     """Explicit native keyring only; never reuse ChatGPT/Codex credentials."""
 
     def __init__(self):
+        self.cloud = None
+        if os.environ.get("ROBIN_OPS_CREDENTIAL_FILE"):
+            try:
+                from .cloud_credentials import EncryptedStore
+
+                self.cloud = EncryptedStore(os.environ["ROBIN_OPS_CREDENTIAL_FILE"])
+                return
+            except Exception:
+                raise AuthError("Secure cloud credential storage is unavailable") from None
         try:
             import keyring
 
@@ -126,6 +135,11 @@ class CredentialStore:
             raise AuthError('Install OAuth dependencies: pip install -e ".[oauth]"') from None
 
     def read(self):
+        if self.cloud is not None:
+            try:
+                return self.cloud.read()
+            except Exception:
+                raise AuthError("Encrypted cloud credentials could not be read") from None
         raw = self.backend.get_password(SERVICE, ACCOUNT)
         if not raw:
             return {}
@@ -140,9 +154,16 @@ class CredentialStore:
             ) from None
 
     def save(self, value):
+        if self.cloud is not None:
+            try:
+                return self.cloud.save(value)
+            except Exception:
+                raise AuthError("Encrypted cloud credentials could not be saved") from None
         self.backend.set_password(SERVICE, ACCOUNT, json.dumps(value, allow_nan=False))
 
     def clear(self):
+        if self.cloud is not None:
+            return self.cloud.clear()
         if self.backend.get_password(SERVICE, ACCOUNT):
             self.backend.delete_password(SERVICE, ACCOUNT)
 

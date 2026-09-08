@@ -1,0 +1,5 @@
+robin-ops.100-57-0-197.sslip.io {
+    header Strict-Transport-Security "max-age=31536000"
+    header X-Robots-Tag "noindex, nofollow"
+    reverse_proxy 127.0.0.1:8766
+}

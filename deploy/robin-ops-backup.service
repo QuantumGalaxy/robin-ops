@@ -1,0 +1,6 @@
+[Unit]
+Description=Consistent Robin Ops state backup
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/python3 /home/ubuntu/robin-ops/deploy/backup.py

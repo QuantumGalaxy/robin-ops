@@ -270,6 +270,8 @@ class Config(BaseSettings):
     reference_data_file: str | None = None
     reference_auto_refresh: bool = False
     paper_iv_history_experiment: bool = False
+    robinhood_iv_daily_collection: bool = False
+    paper_iv_auto_switch: bool = False
     mode: Mode = Mode.PAPER
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
@@ -283,6 +285,20 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def validate_safety(self) -> Config:
+        if (self.robinhood_iv_daily_collection or self.paper_iv_auto_switch) and (
+            self.mode != Mode.PAPER
+            or self.broker.kind != "paper"
+            or self.data_provider != "robinhood_mcp"
+        ):
+            raise ValueError(
+                "Daily IV collection and switching currently require Robinhood paper mode"
+            )
+        if self.paper_iv_auto_switch and (
+            not self.robinhood_iv_daily_collection or not self.paper_iv_history_experiment
+        ):
+            raise ValueError(
+                "Automatic IV switching requires daily collection and paper IV experiment"
+            )
         if self.paper_iv_history_experiment and (
             self.mode != Mode.PAPER
             or self.broker.kind != "paper"

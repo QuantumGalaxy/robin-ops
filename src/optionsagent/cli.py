@@ -414,7 +414,14 @@ def run(
                     from .iv_history import refresh_latest
 
                     try:
-                        update = refresh_latest(cfg.state_dir, cfg.universe.symbols)
+                        from .iv_daily import switched_symbols
+
+                        switched = (
+                            switched_symbols(cfg.state_dir) if cfg.paper_iv_auto_switch else set()
+                        )
+                        update = refresh_latest(
+                            cfg.state_dir, [s for s in cfg.universe.symbols if s not in switched]
+                        )
                         store.event(
                             "iv_history_refresh",
                             {
@@ -436,6 +443,7 @@ def run(
                         cfg.universe.symbols,
                         cfg.reference_data_file,
                         Path(cfg.state_dir) / "iv.sqlite3",
+                        collect_iv=not cfg.robinhood_iv_daily_collection,
                         require_iv_rank=(
                             cfg.entry.require_iv_rank and not cfg.paper_iv_history_experiment
                         ),
@@ -783,15 +791,20 @@ def reference_refresh(config: ConfigOpt = None):
 
     cfg = _load(config)
     if cfg.paper_iv_history_experiment:
+        from .iv_daily import switched_symbols
         from .iv_history import refresh_latest
 
-        console.print(refresh_latest(cfg.state_dir, cfg.universe.symbols))
+        switched = switched_symbols(cfg.state_dir) if cfg.paper_iv_auto_switch else set()
+        console.print(
+            refresh_latest(cfg.state_dir, [s for s in cfg.universe.symbols if s not in switched])
+        )
     path = cfg.reference_data_file or str(Path(cfg.state_dir) / "reference.json")
     errors = refresh_reference(
         HttpToolCaller(),
         cfg.universe.symbols,
         path,
         Path(cfg.state_dir) / "iv.sqlite3",
+        collect_iv=not cfg.robinhood_iv_daily_collection,
         require_iv_rank=cfg.entry.require_iv_rank and not cfg.paper_iv_history_experiment,
     )
     console.print(f"Reference snapshot saved to {path}")
@@ -980,3 +993,23 @@ def alpha_history(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("iv-collect-daily")
+def iv_collect_daily(config: ConfigOpt = None):
+    """Run one durable calendar-aware daily IV collection pass (paper only)."""
+    from .health import Alerts
+    from .iv_daily import collect_once
+    from .mcp.client import HttpToolCaller
+
+    cfg = _load(config)
+    # Separate lock from the trading agent; timer passes cannot overlap.
+    with single_writer(Path(cfg.state_dir) / "iv-collector-lock"):
+        try:
+            result = collect_once(cfg, HttpToolCaller(timeout=10))
+            console.print({"healthy": result["healthy"], "next_window": result["next_window"]})
+        except Exception as exc:
+            Alerts(cfg.state_dir).set(
+                "iv_collector", f"Daily IV collector failed ({type(exc).__name__})"
+            )
+            raise typer.Exit(1) from None

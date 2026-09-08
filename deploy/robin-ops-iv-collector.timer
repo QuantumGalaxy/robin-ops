@@ -1,0 +1,11 @@
+[Unit]
+Description=Check daily Robinhood IV collection every minute
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=60
+AccuracySec=5
+Unit=robin-ops-iv-collector.service
+
+[Install]
+WantedBy=timers.target

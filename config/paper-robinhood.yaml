@@ -12,3 +12,7 @@ risk:
 paper_iv_history_experiment: true
 entry:
   require_iv_rank: true
+
+# Independently scheduled collector; switch each symbol after validated 200-session history.
+robinhood_iv_daily_collection: true
+paper_iv_auto_switch: true

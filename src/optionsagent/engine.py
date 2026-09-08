@@ -472,10 +472,10 @@ class TradingEngine:
             return
 
         if cfg.paper_iv_history_experiment:
-            from .iv_history import paper_iv_rank
+            from .iv_daily import select_rank
 
             # Config validation restricts this alternate source to the paper broker.
-            details = paper_iv_rank(cfg.state_dir, symbol, now)
+            details = select_rank(cfg.state_dir, symbol, now, auto=cfg.paper_iv_auto_switch)
             iv_rank = details["rank"]
             eligible = iv_rank is not None and iv_rank <= cfg.entry.max_iv_rank
             reason = (

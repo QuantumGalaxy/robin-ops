@@ -15,6 +15,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .health import Alerts
 from .runtime import RuntimeStore
@@ -56,6 +57,39 @@ def state(config):
         config.universe.symbols,
         experimental=config.paper_iv_history_experiment,
     )
+    if config.robinhood_iv_daily_collection:
+        from .iv_daily import collection_status, select_rank
+
+        collection = collection_status(config.state_dir, config.universe.symbols)
+        iv_history["collection"] = collection
+        iv_history["status"] = (
+            "Paper IV filter ON · imported DoltHub history plus direct API updates; "
+            "Robinhood history collected separately. Automatic source switching "
+            + ("ON" if config.paper_iv_auto_switch else "OFF")
+        )
+        for row in iv_history["symbols"]:
+            rh = next(r for r in collection["symbols"] if r["symbol"] == row["symbol"])
+            details = select_rank(config.state_dir, row["symbol"], auto=config.paper_iv_auto_switch)
+            row["active_source"] = (
+                "Robinhood"
+                if rh["switched_at"] and config.paper_iv_auto_switch
+                else "DoltHub (experimental)"
+            )
+            row["robinhood_days"] = rh["days"]
+            row["robinhood_latest"] = rh["latest"]
+            if row["active_source"] == "Robinhood":
+                row.update(
+                    days=details["days"],
+                    latest=details["latest"],
+                    missing_sessions=details["missing_sessions"],
+                    fresh=details["latest"] == details["required_through"],
+                    paper_rank=details["rank"],
+                    rank_reason=details["reason"],
+                )
+        if not collection["healthy"]:
+            Alerts(config.state_dir).set(
+                "iv_collector", "Daily IV collector heartbeat is missing or stale"
+            )
     iv_ready = {r["symbol"] for r in iv_history["symbols"] if r.get("paper_rank") is not None}
     store = RuntimeStore(config.state_dir)
     snapshot = store.read()
@@ -133,6 +167,19 @@ def state(config):
 
 
 def make_server(config, port=8766, token=None):
+    public_origin = os.environ.get("ROBIN_OPS_DASHBOARD_ORIGIN", "")
+    if public_origin:
+        parsed = urlsplit(public_origin)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Dashboard public origin must be an HTTPS origin")
     token = token or dashboard_token(config.state_dir)
     cookie_value = hmac.new(token.encode(), b"dashboard-session-v1", hashlib.sha256).hexdigest()
 
@@ -154,6 +201,7 @@ def make_server(config, port=8766, token=None):
                     (
                         f"robin_desk_{self.server.server_port}={cookie_value}; "
                         "HttpOnly; SameSite=Strict; Path=/api/; Max-Age=604800"
+                        + ("; Secure" if public_origin else "")
                     ),
                 )
             self.send_header(
@@ -166,17 +214,19 @@ def make_server(config, port=8766, token=None):
 
         def authorized(self, bearer_only=False):
             host = self.headers.get("Host", "")
-            if host != f"127.0.0.1:{self.server.server_port}":
+            expected_origin = public_origin or f"http://127.0.0.1:{self.server.server_port}"
+            expected_host = urlsplit(expected_origin).netloc
+            if host != expected_host:
                 return False
             origin = self.headers.get("Origin")
-            if origin and origin != f"http://127.0.0.1:{self.server.server_port}":
+            if origin and origin != expected_origin:
                 return False
             if secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + token):
                 return True
             if bearer_only:
                 return False
             # Cookie-only mutations require an exact browser Origin, not merely SameSite.
-            if self.command == "POST" and origin != f"http://127.0.0.1:{self.server.server_port}":
+            if self.command == "POST" and origin != expected_origin:
                 return False
             if self.headers.get("Sec-Fetch-Site") == "cross-site":
                 return False
@@ -191,7 +241,13 @@ def make_server(config, port=8766, token=None):
             if self.path == "/":
                 self.send(
                     200,
-                    files("optionsagent").joinpath("web/index.html").read_bytes(),
+                    files("optionsagent")
+                    .joinpath("web/index.html")
+                    .read_bytes()
+                    .replace(
+                        b"LOCAL WORKSPACE",
+                        b"AWS PAPER DESK" if public_origin else b"LOCAL WORKSPACE",
+                    ),
                     "text/html; charset=utf-8",
                 )
                 return
@@ -247,7 +303,10 @@ def make_server(config, port=8766, token=None):
 
 def serve(config, port=8766, open_browser=True):
     server, token = make_server(config, port)
-    url = f"http://127.0.0.1:{server.server_port}/#{token}"
+    origin = (
+        os.environ.get("ROBIN_OPS_DASHBOARD_ORIGIN") or f"http://127.0.0.1:{server.server_port}"
+    )
+    url = f"{origin}/#{token}"
     print("Private dashboard: " + url, flush=True)
     if open_browser:
         webbrowser.open(url)

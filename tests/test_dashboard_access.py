@@ -98,3 +98,33 @@ def test_cookie_restores_access_and_survives_server_restart(tmp_path, monkeypatc
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_https_proxy_origin_secure_cookie_and_csrf(tmp_path, monkeypatch):
+    monkeypatch.setenv('ROBIN_OPS_DASHBOARD_ORIGIN', 'https://desk.example.com')
+    monkeypatch.setattr('optionsagent.webserver.state', lambda cfg: {'paper': True})
+    server, token = make_server(Config(state_dir=str(tmp_path)), port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    def request(headers):
+        c = http.client.HTTPConnection('127.0.0.1', server.server_port)
+        try:
+            c.request('POST', '/api/session', headers=headers)
+            r = c.getresponse()
+            result = r.status, r.getheader('Set-Cookie')
+            r.read()
+            return result
+        finally:
+            c.close()
+    try:
+        headers = {'Host': 'desk.example.com', 'Origin': 'https://desk.example.com',
+                   'Authorization': 'Bearer ' + token}
+        status, cookie = request(headers)
+        assert status == 200 and '; Secure' in cookie
+        assert request({**headers, 'Origin': 'https://evil.example'})[0] == 403
+        assert request({**headers, 'Host': 'evil.example'})[0] == 403
+        assert request({'Host': 'desk.example.com'})[0] == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

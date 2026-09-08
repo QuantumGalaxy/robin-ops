@@ -110,7 +110,9 @@ class IVArchive:
         return len(prepared)
 
 
-def refresh_reference(caller, symbols, path, iv_path, now=None, require_iv_rank=True):
+def refresh_reference(
+    caller, symbols, path, iv_path, now=None, require_iv_rank=True, collect_iv=True
+):
     now = now or datetime.now(UTC)
     completed = last_completed(now)
     api = RobinhoodMcp(caller)
@@ -186,7 +188,7 @@ def refresh_reference(caller, symbols, path, iv_path, now=None, require_iv_rank=
                 ]
             # Never overwrite a vendor archive with a different IV definition.
             external = any(not source.startswith("Robinhood near-close ATM") for source in sources)
-            if not external:
+            if not external and collect_iv:
                 # Collect a representative completed-session ATM ~30D IV when quote date agrees.
                 chain = api.option_chains(symbol)
                 expiries = [
