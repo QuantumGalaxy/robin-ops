@@ -255,6 +255,11 @@ def comparison_status(root, now=None):
                     description=description,
                     equity=equity,
                     return_pct=equity / s["config"]["broker"]["starting_equity"] - 1,
+                    positions=[str(position(p).contract) for p in s["positions"]],
+                    last_closed=[
+                        {k: t[k] for k in ("contract", "pnl", "closed_at", "reason")}
+                        for t in trades[-3:]
+                    ],
                     closed_trades=len(trades),
                     open_positions=len(s["positions"]),
                     net_pnl=s["realized_pnl"],

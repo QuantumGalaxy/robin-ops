@@ -462,7 +462,7 @@ class TradingEngine:
                 if self.store:
                     self.store.event("scan_error", {"symbol": symbol})
                 log.exception("entry scan failed for %s", symbol)
-                break
+                continue
 
     def _scan_symbol(self, symbol, now, report, dry, equity):
         cfg = self.config
@@ -534,7 +534,12 @@ class TradingEngine:
             as_of=now.date(),
         )
         if not candidates:
-            report.skipped.append(f"{symbol}: no contract passed screening")
+            report.skipped.append(
+                f"{symbol}: no contract passed screening; "
+                + "; ".join(
+                    f"{reason} ({count})" for reason, count in self.screener.rejections.items()
+                )
+            )
             return
 
         # Walk down the ranked list rather than skipping the symbol when the

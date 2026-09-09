@@ -209,8 +209,19 @@ class HttpToolCaller:
             raise McpError("Live mutation tools are disabled in this simulation release")
         self._ensure_initialized()
         result = self._request("tools/call", {"name": name, "arguments": arguments}) or {}
+        # One immediate bounded retry for transient read-only tool errors. Never retry
+        # order review/mutation tools here, and never log credentials or raw responses.
+        if result.get("isError") and name in {
+            "get_equity_quotes",
+            "get_option_quotes",
+            "get_option_chains",
+            "get_option_instruments",
+            "get_equity_historicals",
+        }:
+            log.warning("Retrying failed read-only tool %s once", name)
+            result = self._request("tools/call", {"name": name, "arguments": arguments}) or {}
         if result.get("isError"):
-            raise McpError(f"tool {name} failed")
+            raise McpError(f"tool {name} failed after read attempt(s)")
         return _unwrap_content(result)
 
 

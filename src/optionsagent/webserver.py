@@ -52,6 +52,7 @@ def dashboard_token(state_dir):
 def state(config):
     from .iv_history import history_status
     from .paper_lab import comparison_status
+    from .stock_paper import status as stock_status
 
     iv_history = history_status(
         config.state_dir,
@@ -165,6 +166,7 @@ def state(config):
         "iv_history": iv_history,
         "entry_block": latest_block,
         "experiments": comparison_status(config.state_dir),
+        "stocks": stock_status(config.state_dir),
     }
 
 

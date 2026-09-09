@@ -89,7 +89,10 @@ class RobinhoodMcpMarketData(MarketDataProvider):
         reference = self._reference().get("symbols", {}).get(symbol, {})
         closes = reference.get("daily_closes", [])
         last_date = as_date(reference.get("daily_closes_as_of"))
-        if closes and last_date and 1 <= (self._today() - last_date).days <= 7:
+        from ..reference_feed import last_completed
+
+        required = last_completed(datetime.now(ZoneInfo("America/New_York")))
+        if closes and last_date == required:
             return list(closes[-days:])
         return []
 

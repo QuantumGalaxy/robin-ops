@@ -121,7 +121,10 @@ def test_comparison_closed_trade_metrics(tmp_path):
     path = tmp_path / "experiments/control-v1/runtime.sqlite3"
     with sqlite3.connect(path) as db:
         body = json.loads(db.execute("SELECT body FROM checkpoint WHERE id=1").fetchone()[0])
-        body["trades"] = [{"pnl": 100}, {"pnl": -50}, {"pnl": 0}]
+        body["trades"] = [
+            dict(pnl=pnl, contract="AAPL", closed_at="2026-09-08T18:00:00Z", reason="stop_loss")
+            for pnl in (100, -50, 0)
+        ]
         body["realized_pnl"] = 50
         db.execute("UPDATE checkpoint SET body=? WHERE id=1", (json.dumps(body),))
     control = comparison_status(tmp_path)["profiles"][0]

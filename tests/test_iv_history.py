@@ -205,6 +205,7 @@ def test_paper_engine_actually_applies_experimental_filter(tmp_path, latest, exp
     data.next_earnings_date.return_value = None
     screener = Mock()
     screener.screen.return_value = []
+    screener.rejections = {}
     engine = TradingEngine(
         cfg,
         data,

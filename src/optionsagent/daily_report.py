@@ -135,6 +135,12 @@ def daily_report(root, day):
             for t in trades
         ] or ["- No closed fills."]
         lines += [""]
+    from .stock_paper import report as stock_report
+
+    account, stock_lines = stock_report(root, start, end)
+    lines += stock_lines
+    if account:
+        result["accounts"].append(account)
     result["markdown"] = "\n".join(lines)
     return result
 

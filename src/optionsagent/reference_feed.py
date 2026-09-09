@@ -124,6 +124,13 @@ def refresh_reference(
         "symbols": {},
     }
     errors = []
+    previous = {}
+    try:
+        previous = ReferenceSnapshot.model_validate_json(Path(path).read_text()).model_dump(
+            mode="json"
+        )["symbols"]
+    except (OSError, ValueError):
+        pass
     for symbol in symbols:
         entry = {
             "daily_closes": [],
@@ -132,6 +139,13 @@ def refresh_reference(
             "earnings_checked": False,
             "earnings": None,
         }
+        # Preserve last verified bars with their original date if publication is delayed.
+        # Do not carry forward earnings verification or claim the bars are fresh.
+        old = previous.get(symbol, {})
+        if old.get("daily_closes"):
+            entry.update(
+                daily_closes=old["daily_closes"], daily_closes_as_of=old["daily_closes_as_of"]
+            )
         try:
             raw = caller.call(
                 "get_equity_historicals",
@@ -165,12 +179,17 @@ def refresh_reference(
                     and not bar.get("interpolated", False)
                 ):
                     bars[d] = v
-            if not bars or max(bars) != completed:
+            if not bars:
                 raise ValueError("latest completed daily bar unavailable")
             entry.update(
                 daily_closes=[bars[d] for d in sorted(bars)][-90:],
-                daily_closes_as_of=completed.isoformat(),
+                daily_closes_as_of=max(bars).isoformat(),
             )
+            if max(bars) != completed:
+                errors.append(
+                    f"{symbol}: daily bar pending for {completed}; "
+                    f"last verified session {max(bars)} retained"
+                )
             earnings = caller.call("get_earnings_results", {"symbol": symbol})
             data = earnings.get("data", {})
             future = [as_date((r.get("report") or {}).get("date")) for r in rows(earnings)]

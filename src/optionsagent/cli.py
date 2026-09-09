@@ -409,8 +409,14 @@ def run(
 
             # A separate connection keeps slow reference requests off the exit-monitor path.
             caller = HttpToolCaller()
+            last_iv_refresh = None
             while not reference_stop.is_set():
-                if cfg.paper_iv_history_experiment:
+                refresh_delay = 3600
+                if cfg.paper_iv_history_experiment and (
+                    last_iv_refresh is None
+                    or (datetime.now(UTC) - last_iv_refresh).total_seconds() >= 3600
+                ):
+                    last_iv_refresh = datetime.now(UTC)
                     from .iv_history import refresh_latest
 
                     try:
@@ -449,6 +455,7 @@ def run(
                         ),
                     )
                     if issues:
+                        refresh_delay = 300
                         Alerts(cfg.state_dir).set("reference", "; ".join(issues))
                     else:
                         Alerts(cfg.state_dir).clear("reference")
@@ -456,7 +463,7 @@ def run(
                     Alerts(cfg.state_dir).set(
                         "reference", f"Reference refresh failed: {type(exc).__name__}"
                     )
-                reference_stop.wait(3600)
+                reference_stop.wait(refresh_delay)
 
         if cfg.data_provider == "robinhood_mcp" and cfg.reference_auto_refresh:
             Thread(target=refresh_worker, daemon=True).start()

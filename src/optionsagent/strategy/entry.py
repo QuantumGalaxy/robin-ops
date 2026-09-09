@@ -10,6 +10,7 @@ cost of crossing the spread larger than the target itself.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 
@@ -103,18 +104,21 @@ class EntryScreener:
         confidence: float = 0.5,
         as_of: date | None = None,
     ) -> list[Candidate]:
+        self.rejections = Counter()
         if direction == "none" or direction not in self.cfg.allowed_rights:
             return []
         if (
             days_to_earnings is not None
             and 0 <= days_to_earnings <= self.cfg.avoid_earnings_within_days
         ):
+            self.rejections["earnings too close"] += len(quotes)
             return []
         if self.cfg.require_iv_rank and (
             iv_rank is None
             or not math.isfinite(iv_rank)
             or not 0 <= iv_rank <= self.cfg.max_iv_rank
         ):
+            self.rejections["IV rank missing or above limit"] += len(quotes)
             return []
 
         if not self.cfg.require_iv_rank:
@@ -127,6 +131,12 @@ class EntryScreener:
         out.sort(key=lambda c: c.score, reverse=True)
         return out
 
+    def _reject(self, reason):
+        if not hasattr(self, "rejections"):
+            self.rejections = Counter()
+        self.rejections[reason] += 1
+        return None
+
     def _evaluate(
         self,
         q: OptionQuote,
@@ -137,44 +147,44 @@ class EntryScreener:
     ) -> Candidate | None:
         c = q.contract
         if c.right != direction or not q.is_tradeable() or q.greeks is None:
-            return None
+            return self._reject("wrong direction, missing Greeks or unusable quote")
 
         if self.cfg.require_itm:
             if c.right == "call" and c.strike >= q.underlying_price:
-                return None
+                return self._reject("call not in the money")
             if c.right == "put" and c.strike <= q.underlying_price:
-                return None
+                return self._reject("put not in the money")
         dte = c.days_to_expiry(as_of)
         if not (self.cfg.min_dte <= dte <= self.cfg.max_dte):
-            return None
+            return self._reject("expiry outside range")
         if not (self.cfg.min_premium <= q.mid <= self.cfg.max_premium):
-            return None
+            return self._reject("premium outside range")
         if q.spread_pct > self.cfg.max_spread_pct:
-            return None
+            return self._reject("spread too wide")
         if q.open_interest < self.cfg.min_open_interest:
-            return None
+            return self._reject("open interest too low")
         if q.volume < self.cfg.min_volume:
-            return None
+            return self._reject("volume too low")
 
         g = q.greeks
         if not all(math.isfinite(v) for v in (g.price, g.delta, g.gamma, g.theta, g.vega, g.iv)):
-            return None
+            return self._reject("non-finite Greeks")
         if g.price <= 0 or g.iv <= 0 or g.gamma < 0:
-            return None
+            return self._reject("invalid Greeks")
         if (c.right == "call" and g.delta <= 0) or (c.right == "put" and g.delta >= 0):
-            return None
+            return self._reject("delta has wrong sign")
         abs_delta = abs(g.delta)
         if not (self.cfg.min_abs_delta <= abs_delta <= self.cfg.max_abs_delta):
-            return None
+            return self._reject("delta outside range")
         if g.theta_pct_per_day > self.cfg.max_theta_pct_per_day:
-            return None
+            return self._reject("theta decay too high")
         if g.gamma * 0.01 * q.underlying_price > self.cfg.max_delta_change_per_1pct:
-            return None
+            return self._reject("gamma exposure too high")
 
         move_pct = required_underlying_move(q, self.target_return, self.horizon_days, dte)
         sigmas = move_in_sigmas(q, move_pct, self.horizon_days)
         if not math.isfinite(sigmas) or sigmas > self.max_required_sigma:
-            return None
+            return self._reject("required move too large")
 
         score = self._score(q, g, sigmas, iv_rank, confidence)
         reasons = [
