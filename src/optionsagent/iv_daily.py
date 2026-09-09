@@ -41,17 +41,21 @@ def connect(state_dir):
     return db
 
 
+class IVValidationError(ValueError):
+    """Safe, locally generated validation reason; contains no broker payload."""
+
+
 def stamp(value):
     result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if result.tzinfo is None:
-        raise ValueError("Missing timezone")
+        raise IVValidationError("Missing timezone")
     return result
 
 
 def positive(value):
     result = float(value)
     if not math.isfinite(result) or result <= 0:
-        raise ValueError("Invalid positive value")
+        raise IVValidationError("Invalid positive value")
     return result
 
 
@@ -61,25 +65,25 @@ def validate(sample):
     option_time, spot_time = stamp(sample["quote_at"]), stamp(sample["spot_at"])
     received = stamp(sample["received_at"])
     if sample["source"] != SOURCE or not sample["instrument_id"]:
-        raise ValueError("Wrong IV definition or missing contract")
+        raise IVValidationError("Wrong IV definition or missing contract")
     if not close - timedelta(minutes=15) <= option_time <= close:
-        raise ValueError("Option quote outside closing window")
+        raise IVValidationError("Option quote outside closing window")
     if not close - timedelta(minutes=15) <= spot_time <= close:
-        raise ValueError("Underlying quote outside closing window")
+        raise IVValidationError("Underlying quote outside closing window")
     if abs((option_time - spot_time).total_seconds()) > 120:
-        raise ValueError("Underlying and option timestamps differ")
+        raise IVValidationError("Underlying and option timestamps differ")
     if not option_time <= received <= close + timedelta(minutes=30):
-        raise ValueError("Quote timestamp inconsistent with receipt")
+        raise IVValidationError("Quote timestamp inconsistent with receipt")
     if received <= close and (received - option_time).total_seconds() > 120:
-        raise ValueError("Stale intraday option quote")
+        raise IVValidationError("Stale intraday option quote")
     if not 20 <= (date.fromisoformat(sample["expiry"]) - day).days <= 45:
-        raise ValueError("Expiry outside methodology")
+        raise IVValidationError("Expiry outside methodology")
     iv, bid, ask = positive(sample["iv"]), positive(sample["bid"]), positive(sample["ask"])
     spot, strike = positive(sample["spot"]), positive(sample["strike"])
     if ask < bid or (ask - bid) / ((ask + bid) / 2) > 0.20:
-        raise ValueError("Crossed or excessively wide option market")
+        raise IVValidationError("Crossed or excessively wide option market")
     if abs(strike - spot) / spot > 0.05 or iv > 10:
-        raise ValueError("Invalid ATM distance or implausible IV")
+        raise IVValidationError("Invalid ATM distance or implausible IV")
     return sample
 
 
@@ -88,7 +92,7 @@ def capture(api, symbol, day, clock):
     expiries = sorted(date.fromisoformat(d) for d in chain.get("expiration_dates", []))
     expiries = [d for d in expiries if 20 <= (d - day).days <= 45]
     if not expiries:
-        raise ValueError("No eligible expiry")
+        raise IVValidationError("No eligible expiry")
     expiry = min(expiries, key=lambda d: abs((d - day).days - 30))
     instruments = api.option_instruments(symbol, expiry, "call")
     eligible = [
@@ -104,7 +108,7 @@ def capture(api, symbol, day, clock):
         and r.get("tradability") == "tradable"
     ]
     if not eligible:
-        raise ValueError("No standard tradable call")
+        raise IVValidationError("No standard tradable call")
     equity = api.equity_quote(symbol)
     spot = positive(equity.get("last_trade_price"))
     atm = min(
@@ -121,7 +125,7 @@ def capture(api, symbol, day, clock):
         == atm["id"]
     ]
     if len(matched) != 1:
-        raise ValueError("Missing or mismatched option quote")
+        raise IVValidationError("Missing or mismatched option quote")
     quote = matched[0]
     return validate(
         dict(
@@ -175,7 +179,7 @@ def robinhood_rank(state_dir, symbol, now=None):
                 iv,
                 source,
             ):
-                raise ValueError("Evidence mismatch")
+                raise IVValidationError("Evidence mismatch")
             valid.append((day, iv))
         except (ValueError, TypeError, KeyError, OverflowError):
             invalid += 1
@@ -243,7 +247,7 @@ def switch_ready(state_dir, symbols, now):
 
 def collect_once(config, caller, clock=lambda: datetime.now(UTC)):
     if not config.robinhood_iv_daily_collection:
-        raise ValueError("Daily collector is disabled")
+        raise IVValidationError("Daily collector is disabled")
     now = clock()
     cal = calendar()
     today = now.astimezone(NY).date()
@@ -280,6 +284,8 @@ def collect_once(config, caller, clock=lambda: datetime.now(UTC)):
             error = ""
             try:
                 save_sample(config.state_dir, capture(api, symbol, target, clock))
+            except IVValidationError as exc:
+                error = f"Reading rejected: {exc}"
             except Exception as exc:
                 # No raw API response, account information or token in errors.
                 error = f"Reading rejected or unavailable ({type(exc).__name__})"

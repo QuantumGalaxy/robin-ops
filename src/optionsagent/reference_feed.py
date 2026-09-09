@@ -33,6 +33,39 @@ def session(day):
     }
 
 
+def completed_intraday_close(caller, symbol, day, now):
+    """Recover a session-end trade close only from a complete regular-session series.
+
+    This is not an official auction close. Store its provenance and replace it
+    with the split-adjusted vendor daily bar when that becomes available.
+    """
+    from .stock_paper import candles, stamp
+
+    hours = session(day)
+    opening, closing = stamp(hours["open"]), stamp(hours["close"])
+    if now < closing:
+        raise ValueError("Session not completed")
+    raw = caller.call(
+        "get_equity_historicals",
+        dict(
+            symbols=[symbol],
+            start_time=opening.isoformat(),
+            end_time=closing.isoformat(),
+            interval="5minute",
+            bounds="regular",
+            adjustment_type="split",
+        ),
+    )
+    matches = [r for r in rows(raw) if r.get("symbol") == symbol]
+    if len(matches) != 1:
+        raise ValueError("Missing intraday series")
+    valid = candles(matches[0].get("bars", []), now, opening, closing)
+    expected = int((closing - opening).total_seconds() // 300)
+    if len(valid) != expected:
+        raise ValueError("Incomplete intraday session")
+    return valid[-1]["close"]
+
+
 def last_completed(now):
     cal = calendar()
     d = now.astimezone(NY).date()
@@ -144,7 +177,9 @@ def refresh_reference(
         old = previous.get(symbol, {})
         if old.get("daily_closes"):
             entry.update(
-                daily_closes=old["daily_closes"], daily_closes_as_of=old["daily_closes_as_of"]
+                daily_closes=old["daily_closes"],
+                daily_closes_as_of=old["daily_closes_as_of"],
+                daily_closes_note=old.get("daily_closes_note"),
             )
         try:
             raw = caller.call(
@@ -179,11 +214,24 @@ def refresh_reference(
                     and not bar.get("interpolated", False)
                 ):
                     bars[d] = v
+            recovered = False
+            if bars and max(bars) != completed:
+                try:
+                    bars[completed] = completed_intraday_close(caller, symbol, completed, now)
+                    recovered = True
+                except Exception:
+                    pass  # Keep the real daily history; do not fabricate an incomplete session.
             if not bars:
                 raise ValueError("latest completed daily bar unavailable")
             entry.update(
                 daily_closes=[bars[d] for d in sorted(bars)][-90:],
                 daily_closes_as_of=max(bars).isoformat(),
+                daily_closes_note=(
+                    f"{completed}: complete Robinhood 5-minute session-end close; "
+                    "official daily bar pending"
+                    if recovered
+                    else None
+                ),
             )
             if max(bars) != completed:
                 errors.append(

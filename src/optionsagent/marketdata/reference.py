@@ -27,6 +27,7 @@ class Session(ReferenceModel):
 class ReferenceSymbol(ReferenceModel):
     daily_closes: list[float] = Field(default_factory=list)
     daily_closes_as_of: date | None = None
+    daily_closes_note: str | None = None
     iv_rank: float | None = Field(default=None, ge=0, le=1, strict=True)
     iv_history_days: StrictInt = Field(default=0, ge=0)
     earnings_checked: StrictBool = False

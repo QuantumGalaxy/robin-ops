@@ -127,3 +127,70 @@ def test_completed_today_is_accepted_but_stale_and_future_bars_are_not(monkeypat
     for day in ["2026-09-04", "2026-09-09"]:
         row["daily_closes_as_of"] = day
         assert data.historical_closes("AAPL") == []
+
+
+def test_intraday_fallback_requires_every_completed_session_bar():
+    from datetime import timedelta
+
+    import pytest
+
+    from optionsagent.reference_feed import completed_intraday_close
+
+    opening = datetime(2026, 9, 8, 13, 30, tzinfo=UTC)
+    now = datetime(2026, 9, 8, 21, tzinfo=UTC)
+    bars = [
+        dict(
+            begins_at=(opening + timedelta(minutes=5 * i)).isoformat(),
+            open_price=200,
+            close_price=201,
+            high_price=202,
+            low_price=199,
+            volume=100,
+            session="reg",
+        )
+        for i in range(78)
+    ]
+    caller = Mock()
+    caller.call.return_value = {"data": {"results": [{"symbol": "AAPL", "bars": bars}]}}
+    assert completed_intraday_close(caller, "AAPL", now.date(), now) == 201
+    bars[-1]["interpolated"] = True
+    with pytest.raises(ValueError, match="Incomplete"):
+        completed_intraday_close(caller, "AAPL", now.date(), now)
+    bars[-1].pop("interpolated")
+    bars.pop(20)
+    with pytest.raises(ValueError, match="Incomplete"):
+        completed_intraday_close(caller, "AAPL", now.date(), now)
+    with pytest.raises(ValueError, match="not completed"):
+        completed_intraday_close(caller, "AAPL", now.date(), opening)
+
+
+def test_history_alert_is_not_an_exit_failure_and_recovery_keeps_real_errors(tmp_path):
+    from optionsagent.health import Alerts
+
+    a = Alerts(tmp_path)
+    a.monitoring_result(["AAPL: completed daily bars unavailable"])
+    active = {r["key"] for r in a.list() if r["active"]}
+    assert "entry_history" in active and "monitoring" not in active
+    a.set("monitoring", "NVDA: exit quote unavailable", "critical")
+    a.reference_recovered()
+    assert any(r["key"] == "monitoring" and r["active"] for r in a.list())
+    a.set("monitoring", "AAPL: completed daily bars unavailable", "critical")
+    a.reference_recovered()
+    assert not any(r["active"] for r in a.list())
+
+
+def test_pending_dolthub_is_explicit_and_partial_update_stays_pending(tmp_path):
+    from optionsagent.iv_history import refresh_latest
+
+    now = datetime(2026, 9, 8, 21, tzinfo=UTC)
+    pending = refresh_latest(tmp_path, ["AAPL", "MA"], now, fetcher=lambda *a: {"rows": []})
+    assert pending["status"] == "pending" and pending["missing_symbols"] == ["AAPL", "MA"]
+    partial = refresh_latest(
+        tmp_path,
+        ["AAPL", "MA"],
+        now,
+        fetcher=lambda *a: {
+            "rows": [{"act_symbol": "AAPL", "date": "2026-09-08", "iv_current": "0.25"}]
+        },
+    )
+    assert partial["status"] == "pending" and partial["missing_symbols"] == ["MA"]

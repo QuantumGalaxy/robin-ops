@@ -46,6 +46,37 @@ class Alerts:
                 for r in db.execute("SELECT * FROM alerts ORDER BY active DESC,updated_at DESC")
             ]
 
+    def monitoring_result(self, errors):
+        history = [e for e in errors if e.endswith(": completed daily bars unavailable")]
+        execution = [e for e in errors if e not in history]
+        if history:
+            self.set(
+                "entry_history",
+                f"Daily price history pending for {len(history)} stocks; "
+                "affected options entries blocked. Exit monitoring is separate.",
+            )
+        else:
+            self.clear("entry_history")
+        if execution:
+            self.set("monitoring", "; ".join(execution), "critical")
+        else:
+            self.clear("monitoring")
+
+    def reference_recovered(self):
+        self.clear("entry_history")
+        # Migrate only the old, misclassified daily-history message. Never clear
+        # an unresolved exit/reconciliation error merely because references recovered.
+        for alert in self.list():
+            if (
+                alert["key"] == "monitoring"
+                and alert["active"]
+                and all(
+                    e.endswith(": completed daily bars unavailable")
+                    for e in alert["message"].split("; ")
+                )
+            ):
+                self.clear("monitoring")
+
     def watchdog(self, max_age=180):
         with closing(sqlite3.connect(self.path)) as db, db:
             try:

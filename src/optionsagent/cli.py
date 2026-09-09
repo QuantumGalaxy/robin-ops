@@ -410,11 +410,12 @@ def run(
             # A separate connection keeps slow reference requests off the exit-monitor path.
             caller = HttpToolCaller()
             last_iv_refresh = None
+            iv_refresh_delay = 3600
             while not reference_stop.is_set():
                 refresh_delay = 3600
                 if cfg.paper_iv_history_experiment and (
                     last_iv_refresh is None
-                    or (datetime.now(UTC) - last_iv_refresh).total_seconds() >= 3600
+                    or (datetime.now(UTC) - last_iv_refresh).total_seconds() >= iv_refresh_delay
                 ):
                     last_iv_refresh = datetime.now(UTC)
                     from .iv_history import refresh_latest
@@ -432,15 +433,30 @@ def run(
                             "iv_history_refresh",
                             {
                                 **update,
-                                "message": "Paper IV daily refresh completed",
+                                "message": update.get(
+                                    "message", "Paper IV daily refresh completed"
+                                ),
                             },
                         )
-                        Alerts(cfg.state_dir).clear("iv_download")
+                        if update.get("status") == "pending":
+                            iv_refresh_delay = 900
+                            Alerts(cfg.state_dir).set(
+                                "iv_download",
+                                f"DoltHub IV pending for {update['required_through']}: "
+                                f"{len(update['missing_symbols'])} stocks. "
+                                "Retrying every 15 minutes; "
+                                "affected options entries remain blocked.",
+                            )
+                        else:
+                            iv_refresh_delay = 3600
+                            Alerts(cfg.state_dir).clear("iv_download")
                     except Exception as exc:
+                        iv_refresh_delay = 900
                         # IV download failure must not prevent prices/earnings refresh or exits.
                         Alerts(cfg.state_dir).set(
                             "iv_download",
-                            "Paper IV update unavailable; stale symbols skipped "
+                            "DoltHub IV request failed; retrying every 15 minutes; "
+                            "stale symbols skipped "
                             f"({type(exc).__name__})",
                         )
                 try:
@@ -459,11 +475,30 @@ def run(
                         Alerts(cfg.state_dir).set("reference", "; ".join(issues))
                     else:
                         Alerts(cfg.state_dir).clear("reference")
+                        Alerts(cfg.state_dir).reference_recovered()
+                    import json
+
+                    snapshot = json.loads(Path(cfg.reference_data_file).read_text())
+                    recovered = [
+                        s for s, r in snapshot["symbols"].items() if r.get("daily_closes_note")
+                    ]
+                    if recovered:
+                        refresh_delay = 300
+                        Alerts(cfg.state_dir).set(
+                            "reference_recovery",
+                            f"{len(recovered)} stocks: latest daily price recovered "
+                            "from a complete "
+                            "Robinhood intraday session. Official daily bars will replace the "
+                            "fallback when available.",
+                            "info",
+                        )
+                    else:
+                        Alerts(cfg.state_dir).clear("reference_recovery")
                 except Exception as exc:
                     Alerts(cfg.state_dir).set(
                         "reference", f"Reference refresh failed: {type(exc).__name__}"
                     )
-                reference_stop.wait(refresh_delay)
+                reference_stop.wait(min(refresh_delay, iv_refresh_delay))
 
         if cfg.data_provider == "robinhood_mcp" and cfg.reference_auto_refresh:
             Thread(target=refresh_worker, daemon=True).start()

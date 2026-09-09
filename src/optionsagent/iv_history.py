@@ -252,8 +252,22 @@ def refresh_latest(state_dir, symbols, now=None, fetcher=fetch_latest):
         for row in result["rows"]:
             writer.writerow([row["act_symbol"], row["date"], row.get("iv_current")])
     if not result["rows"]:
-        raise ValueError("Latest IV not yet published; new entries remain gated by freshness")
-    return import_history(path, state_dir, symbols, now)
+        return {
+            "status": "pending",
+            "required_through": str(completed),
+            "missing_symbols": missing,
+            "message": "DoltHub has not published the required completed-session IV",
+        }
+    imported = import_history(path, state_dir, symbols, now)
+    remaining = [
+        r["symbol"] for r in history_status(state_dir, symbols, now)["symbols"] if not r["fresh"]
+    ]
+    return {
+        **imported,
+        "status": "pending" if remaining else "complete",
+        "required_through": str(completed),
+        "missing_symbols": remaining,
+    }
 
 
 def history_status(state_dir, symbols, now=None, experimental=False):

@@ -178,10 +178,7 @@ class TradingEngine:
 
             alerts = Alerts(self.config.state_dir)
             if report:
-                if report.errors:
-                    alerts.set("monitoring", "; ".join(report.errors), "critical")
-                else:
-                    alerts.clear("monitoring")
+                alerts.monitoring_result(report.errors)
                 if self.reconcile_halt or self.orders.pending():
                     alerts.set(
                         "recovery",
